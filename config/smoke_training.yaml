@@ -1,0 +1,50 @@
+training:
+  population_size: 10
+  generations: 5
+
+  initial_capital: 100000.0
+
+  evaluation:
+    episodes_per_agent: 1
+    randomize_start: false
+    randomize_instrument: false
+    randomize_market_regime: false
+
+  evolution:
+    elitism: 0.20
+    survival_rate: 0.50
+
+    mutation:
+      enabled: true
+      rate: 0.10
+      weight_sigma: 0.50
+      add_node_rate: 0.10
+      add_connection_rate: 0.15
+      remove_node_rate: 0.02
+      remove_connection_rate: 0.02
+
+    crossover:
+      enabled: true
+      rate: 0.75
+
+  fitness:
+    return_weight: 1.0
+    sharpe_weight: 0.5
+    drawdown_penalty: 1.0
+    volatility_penalty: 0.25
+    turnover_penalty: 0.10
+
+  diversity:
+    enabled: true
+    species_count_target: 5
+    compatibility_threshold: 3.0
+    random_immigrant_rate: 0.10
+
+  parallel:
+    enabled: false
+    workers: 1
+
+  checkpoints:
+    save_every: 1
+    keep_champions: true
+    keep_archives: true

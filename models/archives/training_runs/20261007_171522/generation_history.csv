@@ -1,0 +1,6 @@
+generation,internal_generation,best_fitness,final_equity,return_percent,max_drawdown_percent,turnover,generation_time_seconds
+1,0,0.148286,100080.82,0.08,0.01,0.1161,25.1
+2,1,0.148286,100080.82,0.08,0.01,0.1161,29.0
+3,2,0.148286,100080.82,0.08,0.01,0.1161,25.7
+4,3,0.148286,100080.82,0.08,0.01,0.1161,28.4
+5,4,4.28214,649343.38,549.34,56.49,9.2057,26.0

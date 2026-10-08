@@ -1,0 +1,25 @@
+live:
+  mode: paper
+
+  broker:
+    provider: ibkr
+
+  market_data:
+    timeframe: 1d
+    lookback: 64
+
+  risk:
+    max_position_fraction: 1.0
+    max_daily_loss: 0.02
+    max_drawdown: 0.10
+
+  execution:
+    order_type: market
+    max_slippage: 0.005
+
+  model:
+    champion_path: models/champions/best_agent.json
+
+  logging:
+    enabled: true
+    directory: logs/livenext

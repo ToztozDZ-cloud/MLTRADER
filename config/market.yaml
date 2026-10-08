@@ -1,0 +1,22 @@
+market:
+  initial_cash: 100000.0
+  currency: USD
+
+  data:
+    timeframe: 1d
+    lookback: 64
+
+  trading:
+    allow_fractional: true
+    allow_short: false
+    max_position_fraction: 1.0
+    max_leverage: 1.0
+
+  costs:
+    commission_rate: 0.0005
+    spread_rate: 0.0002
+    slippage_rate: 0.0005
+
+  execution:
+    order_type: market
+    execute_on_next_bar: true
