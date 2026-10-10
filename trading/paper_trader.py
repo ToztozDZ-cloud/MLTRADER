@@ -62,8 +62,26 @@ class PaperTrader:
         if self.symbols and not force:
             return
         assets = self.broker.assets(refresh=force)
-        # Keep the scan bounded to prevent unbounded API calls on each loop.
-        symbols = sorted(assets.keys())[:self.max_scan_symbols]
+        # Prioritize common liquid instruments, then sample the full alphabetical
+        # symbol range so a scan cap does not accidentally restrict the universe
+        # to tickers near the beginning of the alphabet.
+        priority = [
+            "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "AMZN",
+            "GOOGL", "META", "TSLA", "AVGO", "AMD", "BRK.B", "JPM", "LLY",
+            "WMT", "XOM", "COST", "NFLX", "ORCL", "CRM", "PLTR", "BAC",
+            "GE", "V", "MA", "UNH", "HD", "KO", "PEP", "CSCO", "INTC",
+            "UBER", "DIS", "T", "F", "PFE", "SHOP", "COIN", "SMCI", "SOFI",
+        ]
+        all_symbols = sorted(assets.keys())
+        chosen = [symbol for symbol in priority if symbol in assets]
+        remaining = [symbol for symbol in all_symbols if symbol not in set(chosen)]
+        slots = max(0, self.max_scan_symbols - len(chosen))
+        if slots and len(remaining) > slots:
+            indices = np.linspace(0, len(remaining) - 1, num=slots, dtype=int)
+            chosen.extend(remaining[index] for index in indices)
+        else:
+            chosen.extend(remaining[:slots])
+        symbols = list(dict.fromkeys(chosen))[:self.max_scan_symbols]
         if not symbols:
             raise RuntimeError("Alpaca returned no active, tradable US equities.")
         self.symbols = symbols
