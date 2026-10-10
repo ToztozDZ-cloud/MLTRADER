@@ -72,6 +72,7 @@ def load_market_data(
     *,
     regular_session_only: bool = True,
     exchange_timezone: str = "America/New_York",
+    timeframe: str | None = None,
 ) -> pd.DataFrame:
     """Load validated OHLCV data and preserve timestamps for intraday checks.
 
@@ -134,6 +135,23 @@ def load_market_data(
             minute_of_day = local_time.dt.hour * 60 + local_time.dt.minute
             session_mask = (minute_of_day >= 9 * 60 + 30) & (minute_of_day < 16 * 60)
             data = data.loc[session_mask].copy()
+
+    if timeframe and str(timeframe).lower().endswith("m"):
+        if timestamp_column is None:
+            raise ValueError(
+                f"{timeframe} intraday training requires a timestamp/date column: {path}"
+            )
+        expected_minutes = int(str(timeframe).lower()[:-1])
+        deltas = data["timestamp"].sort_values().diff().dropna()
+        intraday_deltas = deltas[deltas <= pd.Timedelta(hours=1)]
+        if intraday_deltas.empty:
+            raise ValueError(f"No intraday timestamp intervals found in {path}.")
+        median_minutes = intraday_deltas.median().total_seconds() / 60.0
+        if not (expected_minutes * 0.5 <= median_minutes <= expected_minutes * 1.5):
+            raise ValueError(
+                f"{path} appears to use {median_minutes:g}-minute bars, "
+                f"but configuration requires {timeframe} bars."
+            )
 
     data = data.reset_index(drop=True)
     if len(data) < 100:
@@ -449,8 +467,11 @@ def main() -> None:
         args.market_config
     )
 
+    configured_timeframe = str(
+        market_config.get("market", {}).get("data", {}).get("timeframe", "1d")
+    )
     market_datasets = [
-        load_market_data(path)
+        load_market_data(path, timeframe=configured_timeframe)
         for path in args.data
     ]
     market_data = market_datasets[0] if len(market_datasets) == 1 else market_datasets
