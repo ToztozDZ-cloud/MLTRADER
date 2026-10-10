@@ -41,6 +41,14 @@ class PaperTrader:
         self.flatten_before_close_minutes = max(
             1, int(self.settings.get("flatten_before_close_minutes", 10))
         )
+        self.daily_loss_limit_fraction = float(
+            self.settings.get("daily_loss_limit_fraction", 0.02)
+        )
+        if not 0.0 < self.daily_loss_limit_fraction < 1.0:
+            raise ValueError("daily_loss_limit_fraction must be between 0 and 1.")
+        self.session_date = None
+        self.session_start_equity: float | None = None
+        self.daily_loss_stop_triggered = False
 
         print(f"Loading trained agent from {MODEL_PATH}...")
         self.agent = AgentSerializer.load(MODEL_PATH)
@@ -233,10 +241,41 @@ class PaperTrader:
                     desired[symbol] = (0.0, float(frame["close"].iloc[-1]), frame, 0.0)
         return desired
 
+    def _enforce_daily_loss_stop(self, account) -> bool:
+        local_now = pd.Timestamp.now(tz="America/New_York")
+        today = local_now.date()
+        if self.session_date != today:
+            self.session_date = today
+            self.session_start_equity = float(account.equity)
+            self.daily_loss_stop_triggered = False
+            print(f"Daily risk baseline reset: equity=${self.session_start_equity:,.2f}")
+        if self.daily_loss_stop_triggered:
+            return True
+        baseline = self.session_start_equity or float(account.equity)
+        equity = float(account.equity)
+        if baseline > 0 and equity <= baseline * (1.0 - self.daily_loss_limit_fraction):
+            self.daily_loss_stop_triggered = True
+            print(
+                f"DAILY LOSS STOP: equity=${equity:,.2f} reached "
+                f"{self.daily_loss_limit_fraction:.1%} loss limit; flattening and "
+                "blocking further entries for today."
+            )
+            for position in self.broker.positions():
+                try:
+                    if position.symbol not in self.broker.open_order_symbols():
+                        self.broker.close_position(position.symbol)
+                except Exception as exc:
+                    print(f"LOSS-STOP CLOSE FAILED {position.symbol}: {exc}")
+            return True
+        return False
+
     def step(self) -> None:
         clock = self.broker.clock()
         if not clock.is_open:
             print("Market is closed; waiting for the next regular session.")
+            return
+
+        if self._enforce_daily_loss_stop(self.broker.account()):
             return
 
         # Intraday policy: do not open new risk close to the regular-session
