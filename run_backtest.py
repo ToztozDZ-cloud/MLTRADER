@@ -44,7 +44,7 @@ def main() -> None:
             spread_rate=0.0002,
             slippage_rate=0.0005,
         ),
-        allow_short=False,
+        allow_short=True,
         max_position_fraction=1.0,
         max_leverage=1.0,
         execute_on_next_bar=True,
