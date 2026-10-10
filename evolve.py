@@ -293,6 +293,7 @@ def build_evolution_engine(
 
 def build_fitness_calculator(
     training_config: dict,
+    timeframe: str = "1d",
 ) -> FitnessCalculator:
     fitness_config = (
         training_config["training"].get(
@@ -301,7 +302,18 @@ def build_fitness_calculator(
         )
     )
 
+    bars_per_session = {
+        "1m": 390.0,
+        "5m": 78.0,
+        "10m": 39.0,
+        "15m": 26.0,
+        "30m": 13.0,
+        "1h": 6.5,
+        "1d": 1.0,
+    }.get(str(timeframe).lower(), 1.0)
+
     return FitnessCalculator(
+        periods_per_year=252.0 * bars_per_session,
         return_weight=float(
             fitness_config.get(
                 "return_weight",
@@ -513,7 +525,8 @@ def main() -> None:
 
     fitness_calculator = (
         build_fitness_calculator(
-            training_config
+            training_config,
+            timeframe=str(data_config.get("timeframe", "1d")),
         )
     )
 
