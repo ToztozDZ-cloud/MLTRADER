@@ -564,6 +564,9 @@ def main() -> None:
     evaluator = AgentEvaluator(
         lookback=lookback,
         initial_cash=initial_cash,
+        timeframe=str(data_config.get("timeframe", "1d")),
+        exchange_timezone=str(data_config.get("timezone", "America/New_York")),
+        flatten_before_close_minutes=int(data_config.get("flatten_before_close_minutes", 10)),
         costs=costs,
         allow_short=bool(
             trading_config.get(
