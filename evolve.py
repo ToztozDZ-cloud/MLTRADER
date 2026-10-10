@@ -440,9 +440,11 @@ def main() -> None:
         args.market_config
     )
 
-    market_data = load_market_data(
-        args.data
-    )
+    market_datasets = [
+        load_market_data(path)
+        for path in args.data
+    ]
+    market_data = market_datasets[0] if len(market_datasets) == 1 else market_datasets
 
     training_section = training_config[
         "training"
