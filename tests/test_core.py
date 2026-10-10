@@ -14,6 +14,7 @@ from agents.genome import (
 from backtest.engine import BacktestEngine
 from environment.costs import TradingCosts
 from training.evaluator import AgentEvaluator
+from evolution.mutation import mutate_agent
 
 
 def create_test_data(rows: int = 300) -> pd.DataFrame:
@@ -261,3 +262,16 @@ if __name__ == "__main__":
     print("=" * 60)
     print("ALL CORE TESTS PASSED")
     print("=" * 60)
+
+
+def test_mutate_agent_clones_parent_and_resets_fitness() -> None:
+    agent = create_agent(input_size=64 * 5 + 4)
+    agent.fitness = 12.5
+    original_weights = [gene.weight for gene in agent.genome.connections]
+
+    child = mutate_agent(agent)
+
+    assert child is not agent
+    assert child.genome is not agent.genome
+    assert child.fitness == float("-inf")
+    assert [gene.weight for gene in agent.genome.connections] == original_weights
