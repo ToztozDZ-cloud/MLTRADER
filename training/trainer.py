@@ -67,13 +67,8 @@ class Trainer:
         )
 
         if self.evaluator.using_cuda:
-            print(
-                "GPU evaluation: enabled"
-            )
-            print(
-                f"CUDA device: "
-                f"{self.evaluator.device}"
-            )
+            print("GPU available; using CPU reference evaluation until GPU parity is verified.")
+            print(f"CUDA device available: {self.evaluator.device}")
 
             if torch.cuda.is_available():
                 gpu_name = torch.cuda.get_device_name(
@@ -96,9 +91,7 @@ class Trainer:
                     f"{gpu_memory:.2f} GB"
                 )
         else:
-            print(
-                "GPU evaluation: disabled"
-            )
+            print("GPU unavailable; using CPU reference evaluation.")
 
     def train(
         self,
