@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import math
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -49,6 +51,8 @@ class PaperTrader:
         self.session_date = None
         self.session_start_equity: float | None = None
         self.daily_loss_stop_triggered = False
+        self.risk_state_path = Path(LOG_PATH).with_name("paper_risk_state.json")
+        self._load_risk_state()
 
         print(f"Loading trained agent from {MODEL_PATH}...")
         self.agent = AgentSerializer.load(MODEL_PATH)
@@ -241,13 +245,37 @@ class PaperTrader:
                     desired[symbol] = (0.0, float(frame["close"].iloc[-1]), frame, 0.0)
         return desired
 
+    def _load_risk_state(self) -> None:
+        try:
+            state = json.loads(self.risk_state_path.read_text(encoding="utf-8"))
+            self.session_date = state.get("session_date")
+            baseline = state.get("session_start_equity")
+            self.session_start_equity = float(baseline) if baseline is not None else None
+            self.daily_loss_stop_triggered = bool(state.get("daily_loss_stop_triggered", False))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            print(f"WARNING: could not load daily risk state: {exc}")
+
+    def _save_risk_state(self) -> None:
+        self.risk_state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {
+            "session_date": self.session_date,
+            "session_start_equity": self.session_start_equity,
+            "daily_loss_stop_triggered": self.daily_loss_stop_triggered,
+        }
+        temporary = self.risk_state_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        temporary.replace(self.risk_state_path)
+
     def _enforce_daily_loss_stop(self, account) -> bool:
         local_now = pd.Timestamp.now(tz="America/New_York")
-        today = local_now.date()
+        today = local_now.date().isoformat()
         if self.session_date != today:
             self.session_date = today
             self.session_start_equity = float(account.equity)
             self.daily_loss_stop_triggered = False
+            self._save_risk_state()
             print(f"Daily risk baseline reset: equity=${self.session_start_equity:,.2f}")
         if self.daily_loss_stop_triggered:
             return True
@@ -255,6 +283,7 @@ class PaperTrader:
         equity = float(account.equity)
         if baseline > 0 and equity <= baseline * (1.0 - self.daily_loss_limit_fraction):
             self.daily_loss_stop_triggered = True
+            self._save_risk_state()
             print(
                 f"DAILY LOSS STOP: equity=${equity:,.2f} reached "
                 f"{self.daily_loss_limit_fraction:.1%} loss limit; flattening and "
