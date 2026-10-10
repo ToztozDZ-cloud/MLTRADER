@@ -178,6 +178,13 @@ class PaperTrader:
             for symbol, position in positions.items()
             if symbol not in bars_by_symbol or symbol in pending_symbols
         )
+        # Reserve one per-name allocation for pending orders that do not yet
+        # have a position, since a market order may fill after this scan.
+        reserved_gross += sum(
+            self.max_position_fraction
+            for symbol in pending_symbols
+            if symbol not in positions
+        )
         remaining_gross = max(0.0, self.max_gross_exposure - reserved_gross)
         desired: dict[str, tuple[float, float, pd.DataFrame, float]] = {}
         for symbol, signal, price, _dollar_volume, frame in selected:
