@@ -19,12 +19,16 @@ class FitnessCalculator:
         drawdown_penalty: float = 1.0,
         volatility_penalty: float = 0.25,
         turnover_penalty: float = 0.10,
+        periods_per_year: float = 252.0,
     ) -> None:
         self.return_weight = return_weight
         self.sharpe_weight = sharpe_weight
         self.drawdown_penalty = drawdown_penalty
         self.volatility_penalty = volatility_penalty
         self.turnover_penalty = turnover_penalty
+        self.periods_per_year = float(periods_per_year)
+        if not np.isfinite(self.periods_per_year) or self.periods_per_year <= 0:
+            raise ValueError("periods_per_year must be finite and positive.")
 
     def calculate(
         self,
