@@ -60,7 +60,7 @@ class FitnessCalculator:
         if volatility > 0:
             sharpe = float(
                 np.mean(returns) / volatility
-            ) * np.sqrt(252.0)
+            ) * np.sqrt(self.periods_per_year)
         else:
             sharpe = 0.0
 
