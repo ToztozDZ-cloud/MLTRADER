@@ -27,16 +27,16 @@ Copy `.env.example` to `.env` only if using paper trading, then fill in your **A
 
 ## Market data format
 
-Each CSV must contain `open`, `high`, `low`, `close`, and `volume` columns and at least 100 valid rows. Column names are case-insensitive. Use consistent bar intervals across instruments and avoid look-ahead leakage.
+Each CSV must contain `open`, `high`, `low`, `close`, and `volume` columns and at least 100 valid rows. Intraday CSVs must also contain a `timestamp`, `datetime`, `date`, or `time` column. Column names are case-insensitive. Training preserves timestamps, sorts and deduplicates bars, filters timestamped intraday bars to 09:30–16:00 America/New_York, and rejects a bar interval that does not match `config/market.yaml`.
 
-Keep local/raw market data out of Git. The default training data path is `data/raw/SPY.csv`.
+The default configuration now targets five-minute US equity bars (`5m`). Daily OHLCV files such as Yahoo Finance daily exports are not compatible with that configuration. Use timestamped five-minute historical stock bars from a provider such as Alpaca, and use the same bar interval for every instrument. Keep local/raw market data out of Git.
 
 ## Train an evolutionary agent
 
 Train on one or more instruments:
 
 ```bash
-python evolve.py --data data/raw/SPY.csv data/raw/QQQ.csv data/raw/AAPL.csv
+python evolve.py --data data/raw/SPY_5m.csv data/raw/QQQ_5m.csv data/raw/AAPL_5m.csv --reset-champion
 ```
 
 To launch the training tracker with live fitness/equity plots on a desktop that supports Tk:
@@ -60,16 +60,16 @@ Use held-out dates/instruments and include realistic transaction costs. A strong
 
 ## Paper trading
 
-1. Create a local `.env` from `.env.example` and use Alpaca **paper** credentials.
-2. Train/export a model compatible with the configured observation size (64 OHLCV bars plus 4 portfolio features = 324 inputs).
-3. Review `config/trading_universe.yaml`, including symbol scan limits, liquidity filters, position caps, gross exposure, and short-selling settings.
+1. Create a local `.env` from `.env.example` and use Alpaca **paper** credentials only.
+2. Train a new model using timestamped five-minute data and `--reset-champion`; old champions may have been trained with different observation/execution semantics.
+3. The starter universe is fixed to SPY, QQQ, AAPL, and MSFT; shorting is disabled, per-name exposure is capped at 5%, gross exposure at 15%, and a 2% daily loss stop is configured. Review `config/trading_universe.yaml` before starting.
 4. Start the paper trader:
 
    ```bash
    python -m trading.paper_trader
    ```
 
-The trader checks whether the regular market session is open before scanning/submitting orders. It uses Alpaca's paper-trading endpoint and applies configured per-position and gross-exposure caps. Data availability, account permissions, buying power, order support, and broker rules can still prevent orders from being accepted. Do not switch this research project to live trading without a separate, deliberate safety review.
+The trader checks the regular market session, ignores incomplete or stale five-minute bars, blocks new entries near the close, attempts to flatten before the session ends, and applies a daily loss stop. It uses Alpaca's paper endpoint. The CPU reference evaluator is used during evolution until GPU/CPU semantic parity is proven; training may therefore be slower. Data availability, account permissions, buying power, order support, and broker rules can still prevent orders from being accepted. Do not switch this research project to live trading without a separate, deliberate safety review.
 
 ## Tests and code checks
 
