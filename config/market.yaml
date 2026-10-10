@@ -8,7 +8,11 @@ market:
 
   trading:
     allow_fractional: true
+<<<<<<< HEAD
     allow_short: false
+=======
+    allow_short: true
+>>>>>>> origin/master
     max_position_fraction: 1.0
     max_leverage: 1.0
 

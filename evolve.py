@@ -380,8 +380,14 @@ def main() -> None:
     parser.add_argument(
         "--data",
         required=True,
+<<<<<<< HEAD
         type=Path,
         help="Path to OHLCV CSV market data.",
+=======
+        nargs="+",
+        type=Path,
+        help="One or more OHLCV CSV files, ideally one per instrument.",
+>>>>>>> origin/master
     )
 
     parser.add_argument(
@@ -439,9 +445,17 @@ def main() -> None:
         args.market_config
     )
 
+<<<<<<< HEAD
     market_data = load_market_data(
         args.data
     )
+=======
+    market_datasets = [
+        load_market_data(path)
+        for path in args.data
+    ]
+    market_data = market_datasets[0] if len(market_datasets) == 1 else market_datasets
+>>>>>>> origin/master
 
     training_section = training_config[
         "training"
@@ -595,7 +609,11 @@ def main() -> None:
         f"Market data:        {args.data}"
     )
     print(
+<<<<<<< HEAD
         f"Market rows:        {len(market_data)}"
+=======
+        f"Market rows:        {[len(frame) for frame in market_datasets]}"
+>>>>>>> origin/master
     )
     print(
         f"Lookback:           {lookback}"
