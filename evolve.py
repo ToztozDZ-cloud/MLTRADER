@@ -467,11 +467,17 @@ def main() -> None:
         args.market_config
     )
 
-    configured_timeframe = str(
-        market_config.get("market", {}).get("data", {}).get("timeframe", "1d")
-    )
+    market_data_settings = market_config.get("market", {}).get("data", {})
+    configured_timeframe = str(market_data_settings.get("timeframe", "1d"))
+    configured_timezone = str(market_data_settings.get("timezone", "America/New_York"))
+    regular_session_only = bool(market_data_settings.get("regular_session_only", True))
     market_datasets = [
-        load_market_data(path, timeframe=configured_timeframe)
+        load_market_data(
+            path,
+            timeframe=configured_timeframe,
+            exchange_timezone=configured_timezone,
+            regular_session_only=regular_session_only,
+        )
         for path in args.data
     ]
     market_data = market_datasets[0] if len(market_datasets) == 1 else market_datasets
