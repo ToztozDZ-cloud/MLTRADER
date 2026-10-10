@@ -10,7 +10,7 @@ from agents.agent import Agent
 from agents.serialization import AgentSerializer
 from evolution.evolution import EvolutionEngine
 from evolution.population import Population
-from .evaluator import AgentEvaluator
+from .evaluator import AgentEvaluator, EvaluationResult
 
 
 class Trainer:
@@ -382,49 +382,47 @@ class Trainer:
 
     def _evaluate_population(
         self,
-        market_data: pd.DataFrame,
+        market_data: pd.DataFrame | list[pd.DataFrame],
     ):
         agents = self.population.agents
+        datasets = market_data if isinstance(market_data, list) else [market_data]
+        if not datasets:
+            raise ValueError("At least one market dataset is required.")
 
-        if (
-            self.evaluator.using_cuda
-            and len(agents) > 1
-        ):
-            population_result = (
-                self.evaluator.evaluate_population(
-                    agents,
-                    market_data,
-                )
-            )
-
+        if len(datasets) == 1 and self.evaluator.using_cuda and len(agents) > 1:
+            population_result = self.evaluator.evaluate_population(agents, datasets[0])
             return population_result.results
 
         results = []
-
         total = len(agents)
-
-        for index, agent in enumerate(
-            agents,
-            start=1,
-        ):
-            result = self.evaluator.evaluate(
-                agent,
-                market_data,
+        for index, agent in enumerate(agents, start=1):
+            per_dataset = [
+                self.evaluator.evaluate(agent, dataset)
+                for dataset in datasets
+            ]
+            count = len(per_dataset)
+            curve_length = min(len(item.equity_curve) for item in per_dataset)
+            mean_curve = [
+                sum(item.equity_curve[j] for item in per_dataset) / count
+                for j in range(curve_length)
+            ]
+            aggregate = EvaluationResult(
+                fitness=sum(item.fitness for item in per_dataset) / count,
+                final_equity=sum(item.final_equity for item in per_dataset) / count,
+                total_return=sum(item.total_return for item in per_dataset) / count,
+                max_drawdown=max(item.max_drawdown for item in per_dataset),
+                turnover=sum(item.turnover for item in per_dataset) / count,
+                equity_curve=mean_curve,
             )
-
-            results.append(
-                result
-            )
-
+            agent.fitness = aggregate.fitness
+            results.append(aggregate)
             print(
-                f"\rEvaluating agents: "
-                f"{index}/{total}",
+                f"\rEvaluating agents: {index}/{total} "
+                f"({len(datasets)} instruments)",
                 end="",
                 flush=True,
             )
-
         print()
-
         return results
 
     @staticmethod
