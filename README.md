@@ -1,3 +1,12 @@
+<<<<<<< HEAD
+=======
+<<<<<<< HEAD
+
+
+RUN SCRIPT:
+python track_training.py --data data\raw\SPY.csv --training-config config\training.yaml --market-config config\market	.yaml --generations 100
+=======
+>>>>>>> 7ce9a3260bf1e51b5cc30c7b002019690ed69fb8
 # MLTRADER
 
 Evolutionary trading research and Alpaca paper-trading tools.
@@ -36,3 +45,7 @@ The trader discovers active/tradable US equity assets from Alpaca, filters for r
 - The broker can reject orders because of account permissions, buying power, fractional-order support, shortability, market status, or API/data limits.
 - The paper trader logs decisions and orders to `logs/paper_trades.csv`.
 - This is a research system, not a promise of profitability. Paper results do not guarantee live results.
+<<<<<<< HEAD
+=======
+>>>>>>> origin/master
+>>>>>>> 7ce9a3260bf1e51b5cc30c7b002019690ed69fb8
