@@ -1,38 +1,81 @@
 # MLTRADER
 
-Evolutionary trading research and Alpaca paper-trading tools.
+Evolutionary trading research, backtesting, training visualization, and Alpaca paper-trading tools.
 
-## Train a multi-instrument agent
+> **Risk notice:** This is research software, not investment advice or a promise of profitability. Keep paper trading enabled; paper results do not guarantee live performance.
 
-Prepare one CSV per instrument. Each CSV must contain columns named `open`, `high`, `low`, `close`, and `volume`, with at least 100 valid rows. Use the same bar interval for every instrument, and do not include future data in features.
+## Requirements
 
-Example:
+- Python 3.11 or newer
+- Git
+- Historical OHLCV CSV data for training/backtesting
+- For paper trading only: an Alpaca paper account and paper API credentials
+
+Create a virtual environment and install dependencies:
 
 ```bash
-python evolve.py --data data/SPY.csv data/QQQ.csv data/AAPL.csv data/MSFT.csv data/NVDA.csv
+python -m venv .venv
+# Windows PowerShell:
+.\.venv\Scripts\Activate.ps1
+# macOS/Linux:
+# source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
 
-The evolutionary trainer evaluates each candidate on every supplied instrument and aggregates the results, using mean fitness/returns and worst-instrument drawdown. This discourages optimizing for one ticker only. Supply a broader set of historical instruments for a more representative champion. If only one file is supplied, training remains single-instrument.
+Copy `.env.example` to `.env` only if using paper trading, then fill in your **Alpaca paper-account** credentials. Never commit `.env` or real credentials.
+
+## Market data format
+
+Each CSV must contain `open`, `high`, `low`, `close`, and `volume` columns and at least 100 valid rows. Column names are case-insensitive. Use consistent bar intervals across instruments and avoid look-ahead leakage.
+
+Keep local/raw market data out of Git. The default training data path is `data/raw/SPY.csv`.
+
+## Train an evolutionary agent
+
+Train on one or more instruments:
+
+```bash
+python evolve.py --data data/raw/SPY.csv data/raw/QQQ.csv data/raw/AAPL.csv
+```
+
+To launch the training tracker with live fitness/equity plots on a desktop that supports Tk:
+
+```bash
+python track_training.py --data data/raw/SPY.csv
+```
+
+The tracker launches the evolution process and displays the metrics it receives from training. If running without a graphical desktop, use `python evolve.py` directly.
+
+Review `config/training.yaml` and `config/market.yaml` before long runs. Training writes generated checkpoints and champion files under `models/`, which are intentionally excluded from Git.
+
+## Backtesting and validation
+
+```bash
+python run_backtest.py --help
+python validate.py --help
+```
+
+Use held-out dates/instruments and include realistic transaction costs. A strong in-sample fitness score is not sufficient evidence of a robust strategy.
 
 ## Paper trading
 
-1. Install the project's Python dependencies, including Alpaca's trading/data SDK, NumPy, pandas, PyYAML, and python-dotenv.
-2. Put Alpaca paper-account credentials in `.env`:
-   `APCA_API_KEY_ID=...`
-   `APCA_API_SECRET_KEY=...`
-3. Train a model with 324 inputs (64 OHLCV bars plus 4 portfolio features) and confirm `models/champions/best_agent.json` exists.
-4. Review `config/trading_universe.yaml`. The default scanner cap is 1,200 symbols, with up to 10 positions, a 10% per-position cap, an 80% target gross-exposure cap, a $5 minimum price, and a $5M average dollar-volume filter.
-5. Start the paper-only trader:
+1. Create a local `.env` from `.env.example` and use Alpaca **paper** credentials.
+2. Train/export a model compatible with the configured observation size (64 OHLCV bars plus 4 portfolio features = 324 inputs).
+3. Review `config/trading_universe.yaml`, including symbol scan limits, liquidity filters, position caps, gross exposure, and short-selling settings.
+4. Start the paper trader:
+
    ```bash
    python -m trading.paper_trader
    ```
 
-The trader discovers active/tradable US equity assets from Alpaca, filters for recent data and liquidity, ranks signals, checks pending orders, and observes configured portfolio caps. Short orders are submitted only when shorting is enabled and Alpaca reports the asset as shortable. It intentionally uses Alpaca paper mode.
+The trader checks whether the regular market session is open before scanning/submitting orders. It uses Alpaca's paper-trading endpoint and applies configured per-position and gross-exposure caps. Data availability, account permissions, buying power, order support, and broker rules can still prevent orders from being accepted. Do not switch this research project to live trading without a separate, deliberate safety review.
 
-## Important behavior
+## Tests and code checks
 
-- The scanner only evaluates the symbols it can retrieve through the configured Alpaca market-data feed and scan cap; it does not guarantee coverage of every listed security.
-- The model emits signed target exposure. A model trained only on one instrument should be retrained on multiple instruments before using its signals across a broad universe.
-- The broker can reject orders because of account permissions, buying power, fractional-order support, shortability, market status, or API/data limits.
-- The paper trader logs decisions and orders to `logs/paper_trades.csv`.
-- This is a research system, not a promise of profitability. Paper results do not guarantee live results.
+```bash
+python -m compileall -q agents backtest environment evolution trading training validation tests
+python -m pytest -q
+```
+
+The test suite is a smoke check, not proof of profitability or full operational readiness.

@@ -1,0 +1,13 @@
+# Core numerical and training stack
+numpy>=1.26
+pandas>=2.1
+PyYAML>=6.0
+torch>=2.2
+matplotlib>=3.8
+
+# Alpaca paper-trading integration
+alpaca-py>=0.30
+python-dotenv>=1.0
+
+# Test runner
+pytest>=8.0

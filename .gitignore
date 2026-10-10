@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments and local IDE state
+.venv/
+venv/
+env/
+Scripts/
+Lib/
+Include/
+pyvenv.cfg
+.vs/
+.idea/
+.vscode/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Local market data and generated trading outputs
+data/raw/
+data/processed/
+logs/
+models/archives/
+models/champions/*.json
+
+# OS/editor files
+.DS_Store
+Thumbs.db
