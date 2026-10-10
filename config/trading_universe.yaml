@@ -1,20 +1,21 @@
-# Broad-universe paper trading configuration.
-# The scanner discovers active, tradable US equities from Alpaca, fetches recent
-# bars in batches, then ranks liquid symbols before asking the agent for signals.
+# Conservative starter universe for five-minute US-equity paper trading.
 universe:
-  dynamic_asset_discovery: true
-  # Safety/performance cap applied after filtering to active, tradable US equities.
-  max_scan_symbols: 1200
-  bars_batch_size: 100
-  max_positions: 10
+  dynamic_asset_discovery: false
+  symbols:
+    - SPY
+    - QQQ
+    - AAPL
+    - MSFT
+  max_scan_symbols: 4
+  bars_batch_size: 4
+  max_positions: 3
   min_average_dollar_volume: 5000000
   min_price: 5.0
-  # Trade only when the absolute agent signal reaches this threshold.
-  min_signal_strength: 0.15
-  # Per-name and total gross exposure caps. These are portfolio fractions.
-  max_position_fraction: 0.10
-  max_gross_exposure: 0.80
-  allow_short: true
-  # Avoid immediately flipping long-to-short in one order; flatten first.
+  min_signal_strength: 0.20
+  max_position_fraction: 0.05
+  max_gross_exposure: 0.15
+  allow_short: false
   allow_fractional: true
-  scan_interval_steps: 12
+  scan_interval_steps: 1
+  flatten_before_close_minutes: 10
+  daily_loss_limit_fraction: 0.02

@@ -43,19 +43,32 @@ class MarketData:
             return {}
 
         if not isinstance(frame.index, pd.MultiIndex):
-            return {symbol_list[0]: frame.sort_index().tail(limit)}
+            return {symbol_list[0]: self._completed_bars(frame).tail(limit)}
 
         names = list(frame.index.names)
         symbol_level = names.index("symbol") if "symbol" in names else 0
         output: dict[str, pd.DataFrame] = {}
         for symbol in frame.index.get_level_values(symbol_level).unique():
             try:
-                one = frame.xs(symbol, level=symbol_level).sort_index().tail(limit)
+                one = self._completed_bars(
+                    frame.xs(symbol, level=symbol_level)
+                ).tail(limit)
                 if not one.empty:
                     output[str(symbol)] = one
             except KeyError:
                 continue
         return output
+
+    @staticmethod
+    def _completed_bars(frame: pd.DataFrame) -> pd.DataFrame:
+        """Exclude the currently forming five-minute candle."""
+        result = frame.sort_index().copy()
+        if result.empty:
+            return result
+        index = pd.to_datetime(result.index, utc=True, errors="coerce")
+        cutoff = pd.Timestamp.now(tz="UTC").floor(f"{TIMEFRAME_MINUTES}min")
+        result = result.loc[index < cutoff]
+        return result
 
     def get_recent_bars_batched(
         self, symbols: list[str], limit: int = LOOKBACK, batch_size: int = 50

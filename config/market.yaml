@@ -3,16 +3,21 @@ market:
   currency: USD
 
   data:
-    timeframe: 1d
+    timeframe: 5m
     lookback: 64
+    timezone: America/New_York
+    regular_session_only: true
+    flatten_before_close_minutes: 10
 
   trading:
     allow_fractional: true
-    allow_short: true
-    max_position_fraction: 1.0
+    allow_short: false
+    max_position_fraction: 0.05
     max_leverage: 1.0
 
   costs:
+    # Conservative backtest assumptions; spread/slippage are adverse fills,
+    # commission is a separate cash fee. Tune to actual broker/feed data.
     commission_rate: 0.0005
     spread_rate: 0.0002
     slippage_rate: 0.0005

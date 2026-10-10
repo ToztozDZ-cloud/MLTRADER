@@ -67,13 +67,8 @@ class Trainer:
         )
 
         if self.evaluator.using_cuda:
-            print(
-                "GPU evaluation: enabled"
-            )
-            print(
-                f"CUDA device: "
-                f"{self.evaluator.device}"
-            )
+            print("GPU available; using CPU reference evaluation until GPU parity is verified.")
+            print(f"CUDA device available: {self.evaluator.device}")
 
             if torch.cuda.is_available():
                 gpu_name = torch.cuda.get_device_name(
@@ -96,9 +91,7 @@ class Trainer:
                     f"{gpu_memory:.2f} GB"
                 )
         else:
-            print(
-                "GPU evaluation: disabled"
-            )
+            print("GPU unavailable; using CPU reference evaluation.")
 
     def train(
         self,
@@ -389,9 +382,10 @@ class Trainer:
         if not datasets:
             raise ValueError("At least one market dataset is required.")
 
-        if len(datasets) == 1 and self.evaluator.using_cuda and len(agents) > 1:
-            population_result = self.evaluator.evaluate_population(agents, datasets[0])
-            return population_result.results
+        # Use the CPU reference evaluator for training until the vectorized GPU
+        # simulator reproduces the exact ObservationBuilder portfolio state and
+        # execution accounting. A faster path with different inputs can select
+        # a different champion, so correctness takes priority here.
 
         results = []
         total = len(agents)

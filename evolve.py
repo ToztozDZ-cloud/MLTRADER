@@ -69,58 +69,39 @@ def load_yaml(
 
 def load_market_data(
     path: Path,
+    *,
+    regular_session_only: bool = True,
+    exchange_timezone: str = "America/New_York",
+    timeframe: str | None = None,
 ) -> pd.DataFrame:
+    """Load validated OHLCV data and preserve timestamps for intraday checks.
+
+    Timestamped intraday bars are sorted, deduplicated and (by default)
+    restricted to the US regular session, 09:30 inclusive to 16:00 exclusive.
+    Daily data is not session-filtered.
+    """
     if not path.exists():
-        raise FileNotFoundError(
-            f"Market data file not found: {path}"
-        )
+        raise FileNotFoundError(f"Market data file not found: {path}")
 
     data = pd.read_csv(path)
-
     if data.empty:
-        raise ValueError(
-            f"Market data is empty: {path}"
-        )
+        raise ValueError(f"Market data is empty: {path}")
 
-    # Normalize headers without discarding timestamp information. When a
-    # date/time column is present, sort chronologically before dropping it.
-    column_lookup = {
-        str(column).strip().lower(): column
-        for column in data.columns
-    }
-    required_columns = {
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-    }
+    column_lookup = {str(column).strip().lower(): column for column in data.columns}
+    required_columns = {"open", "high", "low", "close", "volume"}
     missing = required_columns - set(column_lookup)
-
     if missing:
-        raise ValueError(
-            "Market data is missing required "
-            f"columns: {sorted(missing)}"
-        )
+        raise ValueError(f"Market data is missing required columns: {sorted(missing)}")
 
     timestamp_column = next(
-        (
-            column_lookup[name]
-            for name in ("timestamp", "datetime", "date", "time")
-            if name in column_lookup
-        ),
+        (column_lookup[name] for name in ("timestamp", "datetime", "date", "time")
+         if name in column_lookup),
         None,
     )
     if timestamp_column is not None:
-        data[timestamp_column] = pd.to_datetime(
-            data[timestamp_column],
-            errors="coerce",
-            utc=True,
-        )
-        data = data.dropna(subset=[timestamp_column]).sort_values(
-            timestamp_column,
-            kind="stable",
-        )
+        data["timestamp"] = pd.to_datetime(data[timestamp_column], errors="coerce", utc=True)
+        data = data.dropna(subset=["timestamp"]).sort_values("timestamp", kind="stable")
+        data = data.drop_duplicates(subset=["timestamp"], keep="last")
 
     rename_map = {
         original: normalized
@@ -128,32 +109,58 @@ def load_market_data(
         if normalized in required_columns
     }
     data = data.rename(columns=rename_map)
-    data = data[
-        ["open", "high", "low", "close", "volume"]
-    ].copy()
+    keep_columns = (["timestamp"] if timestamp_column is not None else []) + [
+        "open", "high", "low", "close", "volume"
+    ]
+    data = data[keep_columns].copy()
 
-    for column in ["open", "high", "low", "close", "volume"]:
-        data[column] = pd.to_numeric(
-            data[column],
-            errors="coerce",
-        )
+    for column in ("open", "high", "low", "close", "volume"):
+        data[column] = pd.to_numeric(data[column], errors="coerce")
 
-    # Reject NaN/inf, non-positive prices, impossible high/low ranges, and
-    # negative volume before these values can contaminate training fitness.
-    data = data.replace([np.inf, -np.inf], np.nan).dropna()
+    data = data.replace([np.inf, -np.inf], np.nan).dropna(
+        subset=["open", "high", "low", "close", "volume"]
+    )
     valid_rows = (
         (data[["open", "high", "low", "close"]] > 0).all(axis=1)
         & (data["high"] >= data["low"])
         & (data["volume"] >= 0)
     )
-    data = data.loc[valid_rows].reset_index(drop=True)
+    data = data.loc[valid_rows].copy()
 
+    if timestamp_column is not None and regular_session_only and len(data) > 2:
+        deltas = data["timestamp"].sort_values().diff().dropna()
+        is_intraday = not deltas.empty and deltas.median() < pd.Timedelta(days=1)
+        if is_intraday:
+            local_time = data["timestamp"].dt.tz_convert(exchange_timezone)
+            minute_of_day = local_time.dt.hour * 60 + local_time.dt.minute
+            session_mask = (minute_of_day >= 9 * 60 + 30) & (minute_of_day < 16 * 60)
+            data = data.loc[session_mask].copy()
+
+    if timeframe and str(timeframe).lower().endswith("m"):
+        if timestamp_column is None:
+            raise ValueError(
+                f"{timeframe} intraday training requires a timestamp/date column: {path}"
+            )
+        expected_minutes = int(str(timeframe).lower()[:-1])
+        deltas = data["timestamp"].sort_values().diff().dropna()
+        intraday_deltas = deltas[deltas <= pd.Timedelta(hours=1)]
+        if intraday_deltas.empty:
+            raise ValueError(f"No intraday timestamp intervals found in {path}.")
+        median_minutes = intraday_deltas.median().total_seconds() / 60.0
+        if not (expected_minutes * 0.5 <= median_minutes <= expected_minutes * 1.5):
+            raise ValueError(
+                f"{path} appears to use {median_minutes:g}-minute bars, "
+                f"but configuration requires {timeframe} bars."
+            )
+
+    data = data.reset_index(drop=True)
     if len(data) < 100:
         raise ValueError(
-            "Market data must contain at least "
-            f"100 valid rows after cleaning. Found {len(data)}."
+            "Market data must contain at least 100 valid rows after cleaning "
+            f"and session filtering. Found {len(data)}."
         )
-
+    if (data[["open", "high", "low", "close"]] <= 0).any().any():
+        raise ValueError("OHLC prices must be positive.")
     return data
 
 
@@ -304,6 +311,7 @@ def build_evolution_engine(
 
 def build_fitness_calculator(
     training_config: dict,
+    timeframe: str = "1d",
 ) -> FitnessCalculator:
     fitness_config = (
         training_config["training"].get(
@@ -312,7 +320,18 @@ def build_fitness_calculator(
         )
     )
 
+    bars_per_session = {
+        "1m": 390.0,
+        "5m": 78.0,
+        "10m": 39.0,
+        "15m": 26.0,
+        "30m": 13.0,
+        "1h": 6.5,
+        "1d": 1.0,
+    }.get(str(timeframe).lower(), 1.0)
+
     return FitnessCalculator(
+        periods_per_year=252.0 * bars_per_session,
         return_weight=float(
             fitness_config.get(
                 "return_weight",
@@ -448,8 +467,17 @@ def main() -> None:
         args.market_config
     )
 
+    market_data_settings = market_config.get("market", {}).get("data", {})
+    configured_timeframe = str(market_data_settings.get("timeframe", "1d"))
+    configured_timezone = str(market_data_settings.get("timezone", "America/New_York"))
+    regular_session_only = bool(market_data_settings.get("regular_session_only", True))
     market_datasets = [
-        load_market_data(path)
+        load_market_data(
+            path,
+            timeframe=configured_timeframe,
+            exchange_timezone=configured_timezone,
+            regular_session_only=regular_session_only,
+        )
         for path in args.data
     ]
     market_data = market_datasets[0] if len(market_datasets) == 1 else market_datasets
@@ -524,7 +552,8 @@ def main() -> None:
 
     fitness_calculator = (
         build_fitness_calculator(
-            training_config
+            training_config,
+            timeframe=str(data_config.get("timeframe", "1d")),
         )
     )
 
@@ -541,6 +570,9 @@ def main() -> None:
     evaluator = AgentEvaluator(
         lookback=lookback,
         initial_cash=initial_cash,
+        timeframe=str(data_config.get("timeframe", "1d")),
+        exchange_timezone=str(data_config.get("timezone", "America/New_York")),
+        flatten_before_close_minutes=int(data_config.get("flatten_before_close_minutes", 10)),
         costs=costs,
         allow_short=bool(
             trading_config.get(
