@@ -110,6 +110,18 @@ class PaperTrader:
             return pd.DataFrame()
         return frame.tail(LOOKBACK)
 
+    @staticmethod
+    def _bars_are_fresh(bars: pd.DataFrame, max_age_minutes: int = 10) -> bool:
+        if bars.empty:
+            return False
+        latest = pd.Timestamp(bars.index[-1])
+        if latest.tzinfo is None:
+            latest = latest.tz_localize("UTC")
+        else:
+            latest = latest.tz_convert("UTC")
+        age_seconds = (pd.Timestamp.now(tz="UTC") - latest).total_seconds()
+        return -60.0 <= age_seconds <= max_age_minutes * 60.0
+
     def _observation(self, bars: pd.DataFrame, account, position) -> np.ndarray:
         frame = self._clean_bars(bars)
         if frame.empty:
@@ -152,6 +164,9 @@ class PaperTrader:
         candidates = []
         for symbol, raw_frame in bars_by_symbol.items():
             if symbol in pending_symbols:
+                continue
+            if not self._bars_are_fresh(raw_frame):
+                print(f"SKIP {symbol}: latest completed bar is stale.")
                 continue
             frame = self._clean_bars(raw_frame)
             if frame.empty:
