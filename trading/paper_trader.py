@@ -138,8 +138,11 @@ class PaperTrader:
 
         account = self.broker.account()
         positions = {p.symbol: p for p in self.broker.positions()}
+        pending_symbols = self.broker.open_order_symbols()
         candidates = []
         for symbol, raw_frame in bars_by_symbol.items():
+            if symbol in pending_symbols:
+                continue
             frame = self._clean_bars(raw_frame)
             if frame.empty:
                 continue
@@ -170,7 +173,12 @@ class PaperTrader:
         # Selected positions receive a target allocation under the total gross
         # exposure budget. Existing positions not selected below are targeted to
         # zero, so their exposure does not consume this new target budget.
-        remaining_gross = self.max_gross_exposure
+        reserved_gross = sum(
+            abs(float(position.market_value)) / max(equity, 1.0)
+            for symbol, position in positions.items()
+            if symbol not in bars_by_symbol or symbol in pending_symbols
+        )
+        remaining_gross = max(0.0, self.max_gross_exposure - reserved_gross)
         desired: dict[str, tuple[float, float, pd.DataFrame, float]] = {}
         for symbol, signal, price, _dollar_volume, frame in selected:
             if signal < 0 and not self.allow_short:
@@ -187,7 +195,7 @@ class PaperTrader:
         # Flatten existing positions which are no longer selected. Avoid changing
         # any position for which fresh data was unavailable; that avoids blind orders.
         for symbol, position in positions.items():
-            if symbol not in desired and symbol in bars_by_symbol:
+            if symbol not in desired and symbol in bars_by_symbol and symbol not in pending_symbols:
                 frame = self._clean_bars(bars_by_symbol[symbol])
                 if not frame.empty:
                     desired[symbol] = (0.0, float(frame["close"].iloc[-1]), frame, 0.0)
@@ -204,6 +212,7 @@ class PaperTrader:
 
         account = self.broker.account()
         positions = {p.symbol: p for p in self.broker.positions()}
+        pending_symbols = self.broker.open_order_symbols()
         orders_submitted = 0
         for symbol, (target_fraction, price, frame, signal) in desired.items():
             if symbol in self.last_bar_time and self.last_bar_time[symbol] == frame.index[-1]:
@@ -211,6 +220,9 @@ class PaperTrader:
             self.last_bar_time[symbol] = frame.index[-1]
             self.last_prices[symbol] = price
             self.last_signals[symbol] = signal
+            if symbol in pending_symbols:
+                print(f"SKIP {symbol}: an order is already open.")
+                continue
             position = positions.get(symbol)
             current_qty = float(position.qty) if position is not None else 0.0
             equity = float(account.equity)
