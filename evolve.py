@@ -380,8 +380,9 @@ def main() -> None:
     parser.add_argument(
         "--data",
         required=True,
+        nargs="+",
         type=Path,
-        help="Path to OHLCV CSV market data.",
+        help="One or more OHLCV CSV files, ideally one per instrument.",
     )
 
     parser.add_argument(
