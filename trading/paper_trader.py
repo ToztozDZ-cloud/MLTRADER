@@ -214,36 +214,51 @@ class PaperTrader:
         positions = {p.symbol: p for p in self.broker.positions()}
         pending_symbols = self.broker.open_order_symbols()
         orders_submitted = 0
+        log_symbols: list[tuple[str, float, float, float, str | None]] = []
+
         for symbol, (target_fraction, price, frame, signal) in desired.items():
-            if symbol in self.last_bar_time and self.last_bar_time[symbol] == frame.index[-1]:
-                continue
-            self.last_bar_time[symbol] = frame.index[-1]
-            self.last_prices[symbol] = price
-            self.last_signals[symbol] = signal
             if symbol in pending_symbols:
                 print(f"SKIP {symbol}: an order is already open.")
                 continue
+            if symbol in self.last_bar_time and self.last_bar_time[symbol] == frame.index[-1]:
+                continue
+
             position = positions.get(symbol)
             current_qty = float(position.qty) if position is not None else 0.0
             equity = float(account.equity)
             target_qty = equity * target_fraction / price
             delta = target_qty - current_qty
-            # Limit the agent's orders to symbols that Alpaca reports as tradable.
             try:
                 order = self.broker.submit_delta(symbol, delta, allow_short=self.allow_short)
             except Exception as exc:
                 print(f"ORDER FAILED {symbol}: {exc}")
                 continue
+
+            self.last_bar_time[symbol] = frame.index[-1]
+            self.last_prices[symbol] = price
+            self.last_signals[symbol] = signal
             if order is not None:
                 orders_submitted += 1
                 print(f"ORDER {symbol}: target={target_fraction:+.1%}, qty_delta={delta:+.4f}, id={order.id}")
-            updated_position = self.broker.position(symbol)
-            updated_qty = float(updated_position.qty) if updated_position is not None else 0.0
-            updated_account = self.broker.account()
+            log_symbols.append(
+                (symbol, price, signal, target_fraction, str(order.id) if order else None)
+            )
+
+        # Refresh positions/account once after the order batch rather than once
+        # per ticker; this reduces API traffic and logs a consistent snapshot.
+        final_positions = {p.symbol: p for p in self.broker.positions()}
+        final_account = self.broker.account()
+        for symbol, price, signal, target_fraction, order_id in log_symbols:
+            final_position = final_positions.get(symbol)
+            final_qty = float(final_position.qty) if final_position is not None else 0.0
             self.logger.log(
-                symbol=symbol, price=price, agent_output=signal,
-                target_position=target_fraction, current_position=updated_qty,
-                equity=float(updated_account.equity), order_id=str(order.id) if order else None,
+                symbol=symbol,
+                price=price,
+                agent_output=signal,
+                target_position=target_fraction,
+                current_position=final_qty,
+                equity=float(final_account.equity),
+                order_id=order_id,
             )
         print(f"Scan complete: {len(desired)} target symbols; {orders_submitted} orders submitted.")
 
