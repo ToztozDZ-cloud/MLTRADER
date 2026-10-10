@@ -42,7 +42,7 @@ python evolve.py --data data/raw/SPY_5m.csv data/raw/QQQ_5m.csv data/raw/AAPL_5m
 To launch the training tracker with live fitness/equity plots on a desktop that supports Tk:
 
 ```bash
-python track_training.py --data data/raw/SPY.csv
+python track_training.py --data data/raw/SPY_5m.csv
 ```
 
 The tracker launches the evolution process and displays the metrics it receives from training. If running without a graphical desktop, use `python evolve.py` directly.
