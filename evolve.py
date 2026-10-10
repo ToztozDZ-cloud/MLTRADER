@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 import yaml
@@ -81,6 +82,12 @@ def load_market_data(
             f"Market data is empty: {path}"
         )
 
+    # Normalize headers without discarding timestamp information. When a
+    # date/time column is present, sort chronologically before dropping it.
+    column_lookup = {
+        str(column).strip().lower(): column
+        for column in data.columns
+    }
     required_columns = {
         "open",
         "high",
@@ -88,13 +95,7 @@ def load_market_data(
         "close",
         "volume",
     }
-
-    columns = {
-        column.lower()
-        for column in data.columns
-    }
-
-    missing = required_columns - columns
+    missing = required_columns - set(column_lookup)
 
     if missing:
         raise ValueError(
@@ -102,48 +103,55 @@ def load_market_data(
             f"columns: {sorted(missing)}"
         )
 
-    rename_map = {}
-
-    for column in data.columns:
-        lower = column.lower()
-
-        if lower in required_columns:
-            rename_map[column] = lower
-
-    data = data.rename(
-        columns=rename_map
+    timestamp_column = next(
+        (
+            column_lookup[name]
+            for name in ("timestamp", "datetime", "date", "time")
+            if name in column_lookup
+        ),
+        None,
     )
+    if timestamp_column is not None:
+        data[timestamp_column] = pd.to_datetime(
+            data[timestamp_column],
+            errors="coerce",
+            utc=True,
+        )
+        data = data.dropna(subset=[timestamp_column]).sort_values(
+            timestamp_column,
+            kind="stable",
+        )
 
+    rename_map = {
+        original: normalized
+        for normalized, original in column_lookup.items()
+        if normalized in required_columns
+    }
+    data = data.rename(columns=rename_map)
     data = data[
-        [
-            "open",
-            "high",
-            "low",
-            "close",
-            "volume",
-        ]
+        ["open", "high", "low", "close", "volume"]
     ].copy()
 
-    for column in [
-        "open",
-        "high",
-        "low",
-        "close",
-        "volume",
-    ]:
+    for column in ["open", "high", "low", "close", "volume"]:
         data[column] = pd.to_numeric(
             data[column],
             errors="coerce",
         )
 
-    data = data.dropna().reset_index(
-        drop=True
+    # Reject NaN/inf, non-positive prices, impossible high/low ranges, and
+    # negative volume before these values can contaminate training fitness.
+    data = data.replace([np.inf, -np.inf], np.nan).dropna()
+    valid_rows = (
+        (data[["open", "high", "low", "close"]] > 0).all(axis=1)
+        & (data["high"] >= data["low"])
+        & (data["volume"] >= 0)
     )
+    data = data.loc[valid_rows].reset_index(drop=True)
 
     if len(data) < 100:
         raise ValueError(
             "Market data must contain at least "
-            f"100 valid rows. Found {len(data)}."
+            f"100 valid rows after cleaning. Found {len(data)}."
         )
 
     return data
