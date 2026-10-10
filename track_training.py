@@ -656,6 +656,8 @@ class TrainingGraph:
         self.returns: list[float] = []
         self.fitnesses: list[float] = []
         self.equities: list[float] = []
+        self.drawdowns: list[float] = []
+        self.turnovers: list[float] = []
 
         self.closed = False
         self.training_finished = False
@@ -737,8 +739,8 @@ class TrainingGraph:
         self.metrics_window.title(
             "MLTRADER — Fitness & Final Equity"
         )
-        self.metrics_window.geometry("1100x850")
-        self.metrics_window.minsize(850, 700)
+        self.metrics_window.geometry("1400x1000")
+        self.metrics_window.minsize(1000, 750)
         self.metrics_window.protocol(
             "WM_DELETE_WINDOW",
             self.on_close,
@@ -766,75 +768,64 @@ class TrainingGraph:
             expand=True,
         )
 
-        self.figure_fitness, self.axis_fitness = plt.subplots(
-            figsize=(11, 4),
-            dpi=100,
-        )
+        # Four live diagnostic plots arranged as a single dashboard.
+        chart_frame = tk.Frame(self.metrics_window, padx=8, pady=4)
+        chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
 
-        self.axis_fitness.set_title(
-            "MLTRADER Evolution — Best Fitness"
-        )
+        self.figure_fitness, self.axis_fitness = plt.subplots(figsize=(6.5, 3.2), dpi=100)
+        self.axis_fitness.set_title("Best Fitness by Generation")
         self.axis_fitness.set_xlabel("Generation")
         self.axis_fitness.set_ylabel("Fitness")
         self.axis_fitness.grid(True, alpha=0.25)
-        self.axis_fitness.xaxis.set_major_locator(
-            MaxNLocator(integer=True, nbins=15)
-        )
-
-        self.fitness_line, = self.axis_fitness.plot(
-            [], [],
-            marker="o",
-            linewidth=1.5,
-            markersize=4,
-        )
-
-        self.canvas_fitness = FigureCanvasTkAgg(
-            self.figure_fitness,
-            master=self.metrics_window,
-        )
-        self.canvas_fitness.get_tk_widget().pack(
-            side=tk.TOP,
-            fill=tk.BOTH,
-            expand=True,
-            padx=10,
-            pady=(5, 5),
-        )
+        self.axis_fitness.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
+        self.fitness_line, = self.axis_fitness.plot([], [], marker="o", linewidth=1.5, markersize=3)
+        self.canvas_fitness = FigureCanvasTkAgg(self.figure_fitness, master=chart_frame)
+        self.canvas_fitness.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
         self.canvas_fitness.draw()
 
-        self.figure_equity, self.axis_equity = plt.subplots(
-            figsize=(11, 4),
-            dpi=100,
-        )
-
-        self.axis_equity.set_title(
-            "MLTRADER Evolution — Final Equity"
-        )
+        self.figure_equity, self.axis_equity = plt.subplots(figsize=(6.5, 3.2), dpi=100)
+        self.axis_equity.set_title("Champion Final Equity")
         self.axis_equity.set_xlabel("Generation")
         self.axis_equity.set_ylabel("Final Equity (USD)")
         self.axis_equity.grid(True, alpha=0.25)
-        self.axis_equity.xaxis.set_major_locator(
-            MaxNLocator(integer=True, nbins=15)
-        )
-
-        self.equity_line, = self.axis_equity.plot(
-            [], [],
-            marker="o",
-            linewidth=1.5,
-            markersize=4,
-        )
-
-        self.canvas_equity = FigureCanvasTkAgg(
-            self.figure_equity,
-            master=self.metrics_window,
-        )
-        self.canvas_equity.get_tk_widget().pack(
-            side=tk.TOP,
-            fill=tk.BOTH,
-            expand=True,
-            padx=10,
-            pady=(5, 10),
-        )
+        self.axis_equity.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
+        self.equity_line, = self.axis_equity.plot([], [], marker="o", linewidth=1.5, markersize=3)
+        self.canvas_equity = FigureCanvasTkAgg(self.figure_equity, master=chart_frame)
+        self.canvas_equity.get_tk_widget().grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
         self.canvas_equity.draw()
+
+        self.figure_return, self.axis_return = plt.subplots(figsize=(6.5, 3.2), dpi=100)
+        self.axis_return.set_title("Champion Return by Generation")
+        self.axis_return.set_xlabel("Generation")
+        self.axis_return.set_ylabel("Return (%)")
+        self.axis_return.axhline(y=0.0, linewidth=1.0, linestyle="--", alpha=0.6)
+        self.axis_return.grid(True, alpha=0.25)
+        self.axis_return.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
+        self.return_line, = self.axis_return.plot([], [], marker="o", linewidth=1.5, markersize=3)
+        self.canvas_return = FigureCanvasTkAgg(self.figure_return, master=chart_frame)
+        self.canvas_return.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
+        self.canvas_return.draw()
+
+        self.figure_risk, self.axis_risk = plt.subplots(figsize=(6.5, 3.2), dpi=100)
+        self.axis_risk.set_title("Maximum Drawdown and Turnover")
+        self.axis_risk.set_xlabel("Generation")
+        self.axis_risk.set_ylabel("Max drawdown (%)")
+        self.axis_risk.grid(True, alpha=0.25)
+        self.axis_risk.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
+        self.drawdown_line, = self.axis_risk.plot([], [], marker="o", linewidth=1.5, markersize=3, label="Max drawdown")
+        self.axis_turnover = self.axis_risk.twinx()
+        self.turnover_line, = self.axis_turnover.plot([], [], linestyle="--", linewidth=1.2, label="Turnover")
+        self.axis_turnover.set_ylabel("Turnover")
+        self.axis_risk.legend(loc="upper left")
+        self.axis_turnover.legend(loc="upper right")
+        self.canvas_risk = FigureCanvasTkAgg(self.figure_risk, master=chart_frame)
+        self.canvas_risk.get_tk_widget().grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
+        self.canvas_risk.draw()
+
+        chart_frame.grid_rowconfigure(0, weight=1)
+        chart_frame.grid_rowconfigure(1, weight=1)
+        chart_frame.grid_columnconfigure(0, weight=1)
+        chart_frame.grid_columnconfigure(1, weight=1)
 
         self.root.after(200, self.process_events)
 
@@ -883,12 +874,13 @@ class TrainingGraph:
             if final_equity is not None
             else float("nan")
         )
+        drawdown = metrics.get("max_drawdown_percent")
+        turnover = metrics.get("turnover")
+        self.drawdowns.append(float(drawdown) if drawdown is not None else float("nan"))
+        self.turnovers.append(float(turnover) if turnover is not None else float("nan"))
 
         # Return
-        self.return_line.set_data(
-            self.generations,
-            self.returns,
-        )
+        self.return_line.set_data(self.generations, self.returns)
         self.axis_return.relim()
         self.axis_return.autoscale_view()
 
@@ -908,6 +900,13 @@ class TrainingGraph:
         self.axis_equity.relim()
         self.axis_equity.autoscale_view()
 
+        self.drawdown_line.set_data(self.generations, self.drawdowns)
+        self.axis_risk.relim()
+        self.axis_risk.autoscale_view()
+        self.turnover_line.set_data(self.generations, self.turnovers)
+        self.axis_turnover.relim()
+        self.axis_turnover.autoscale_view()
+
         self.axis_return.xaxis.set_major_locator(
             MaxNLocator(integer=True, nbins=15)
         )
@@ -915,6 +914,9 @@ class TrainingGraph:
             MaxNLocator(integer=True, nbins=15)
         )
         self.axis_equity.xaxis.set_major_locator(
+            MaxNLocator(integer=True, nbins=15)
+        )
+        self.axis_risk.xaxis.set_major_locator(
             MaxNLocator(integer=True, nbins=15)
         )
 
@@ -956,8 +958,9 @@ class TrainingGraph:
         self.canvas_return.draw_idle()
         self.canvas_fitness.draw_idle()
         self.canvas_equity.draw_idle()
+        self.canvas_risk.draw_idle()
 
-        # Save all three live graphs.
+        # Save the live dashboard plots.
         self.figure_return.savefig(
             self.run_dir / "return_curve.png",
             dpi=120,
@@ -970,6 +973,11 @@ class TrainingGraph:
         )
         self.figure_equity.savefig(
             self.run_dir / "equity_curve.png",
+            dpi=120,
+            bbox_inches="tight",
+        )
+        self.figure_risk.savefig(
+            self.run_dir / "risk_turnover_curve.png",
             dpi=120,
             bbox_inches="tight",
         )
@@ -1014,6 +1022,7 @@ class TrainingGraph:
         self.canvas_return.draw_idle()
         self.canvas_fitness.draw_idle()
         self.canvas_equity.draw_idle()
+        self.canvas_risk.draw_idle()
 
     def handle_error(self, payload: dict) -> None:
         self.training_finished = True
