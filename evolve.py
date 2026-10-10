@@ -598,7 +598,7 @@ def main() -> None:
         f"Market data:        {args.data}"
     )
     print(
-        f"Market rows:        {len(market_data)}"
+        f"Market rows:        {[len(frame) for frame in market_datasets]}"
     )
     print(
         f"Lookback:           {lookback}"
