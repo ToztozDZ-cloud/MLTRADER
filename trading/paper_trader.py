@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -36,7 +37,10 @@ class PaperTrader:
         self.max_gross_exposure = float(self.settings.get("max_gross_exposure", 0.80))
         self.allow_short = bool(self.settings.get("allow_short", True))
         self.allow_fractional = bool(self.settings.get("allow_fractional", True))
-        self.scan_interval_steps = max(1, int(self.settings.get("scan_interval_steps", 12)))
+        self.scan_interval_steps = max(1, int(self.settings.get("scan_interval_steps", 1)))
+        self.flatten_before_close_minutes = max(
+            1, int(self.settings.get("flatten_before_close_minutes", 10))
+        )
 
         print(f"Loading trained agent from {MODEL_PATH}...")
         self.agent = AgentSerializer.load(MODEL_PATH)
@@ -61,26 +65,32 @@ class PaperTrader:
         if self.symbols and not force:
             return
         assets = self.broker.assets(refresh=force)
-        # Prioritize common liquid instruments, then sample the full alphabetical
-        # symbol range so a scan cap does not accidentally restrict the universe
-        # to tickers near the beginning of the alphabet.
-        priority = [
-            "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "AMZN",
-            "GOOGL", "META", "TSLA", "AVGO", "AMD", "BRK.B", "JPM", "LLY",
-            "WMT", "XOM", "COST", "NFLX", "ORCL", "CRM", "PLTR", "BAC",
-            "GE", "V", "MA", "UNH", "HD", "KO", "PEP", "CSCO", "INTC",
-            "UBER", "DIS", "T", "F", "PFE", "SHOP", "COIN", "SMCI", "SOFI",
-        ]
-        all_symbols = sorted(assets.keys())
-        chosen = [symbol for symbol in priority if symbol in assets]
-        remaining = [symbol for symbol in all_symbols if symbol not in set(chosen)]
-        slots = max(0, self.max_scan_symbols - len(chosen))
-        if slots and len(remaining) > slots:
-            indices = np.linspace(0, len(remaining) - 1, num=slots, dtype=int)
-            chosen.extend(remaining[index] for index in indices)
+        if not bool(self.settings.get("dynamic_asset_discovery", False)):
+            requested = self.settings.get("symbols", ["SPY", "QQQ", "AAPL", "MSFT"])
+            if not isinstance(requested, list) or not requested:
+                raise ValueError("Static universe must contain a non-empty symbols list.")
+            unavailable = [symbol for symbol in requested if symbol not in assets]
+            if unavailable:
+                raise RuntimeError(
+                    "Configured symbols are not active/tradable in Alpaca: "
+                    + ", ".join(unavailable)
+                )
+            symbols = list(dict.fromkeys(requested))[:self.max_scan_symbols]
         else:
-            chosen.extend(remaining[:slots])
-        symbols = list(dict.fromkeys(chosen))[:self.max_scan_symbols]
+            priority = [
+                "SPY", "QQQ", "IWM", "DIA", "AAPL", "MSFT", "NVDA", "AMZN",
+                "GOOGL", "META", "TSLA", "AVGO", "AMD", "BRK.B", "JPM", "LLY",
+            ]
+            all_symbols = sorted(assets.keys())
+            chosen = [symbol for symbol in priority if symbol in assets]
+            remaining = [symbol for symbol in all_symbols if symbol not in set(chosen)]
+            slots = max(0, self.max_scan_symbols - len(chosen))
+            if slots and len(remaining) > slots:
+                indices = np.linspace(0, len(remaining) - 1, num=slots, dtype=int)
+                chosen.extend(remaining[index] for index in indices)
+            else:
+                chosen.extend(remaining[:slots])
+            symbols = list(dict.fromkeys(chosen))[:self.max_scan_symbols]
         if not symbols:
             raise RuntimeError("Alpaca returned no active, tradable US equities.")
         self.symbols = symbols
@@ -108,8 +118,8 @@ class PaperTrader:
         price = float(values[-1, 3])
         normalized = values.copy()
         normalized[:, :4] = normalized[:, :4] / price - 1.0
-        volume_mean = float(np.mean(normalized[:, 4]))
-        normalized[:, 4] = normalized[:, 4] / volume_mean - 1.0 if volume_mean > 0 else 0.0
+        volume_mean = float(np.mean(values[:, 4]))
+        normalized[:, 4] = values[:, 4] / volume_mean - 1.0 if volume_mean > 0 else 0.0
 
         equity = float(account.equity)
         cash = float(account.cash)
@@ -209,8 +219,31 @@ class PaperTrader:
         return desired
 
     def step(self) -> None:
-        if not self.broker.market_is_open():
+        clock = self.broker.clock()
+        if not clock.is_open:
             print("Market is closed; waiting for the next regular session.")
+            return
+
+        # Intraday policy: do not open new risk close to the regular-session
+        # close. Flatten existing positions before the session ends.
+        next_close = clock.next_close
+        now = datetime.now(timezone.utc)
+        if next_close.tzinfo is None:
+            next_close = next_close.replace(tzinfo=timezone.utc)
+        minutes_to_close = (next_close - now).total_seconds() / 60.0
+        if minutes_to_close <= self.flatten_before_close_minutes:
+            print(
+                f"Regular-session close in {max(0.0, minutes_to_close):.1f} min; "
+                "flattening paper positions."
+            )
+            for position in self.broker.positions():
+                try:
+                    if position.symbol not in self.broker.open_order_symbols():
+                        order = self.broker.close_position(position.symbol)
+                        if order is not None:
+                            print(f"CLOSE {position.symbol}: order_id={order.id}")
+                except Exception as exc:
+                    print(f"CLOSE FAILED {position.symbol}: {exc}")
             return
         self.step_count += 1
         if self.step_count % self.scan_interval_steps == 1:
@@ -276,7 +309,7 @@ class PaperTrader:
         print("=" * 60)
         print("MLTRADER MULTI-ASSET PAPER TRADER")
         print("=" * 60)
-        print(f"Dynamic universe cap: {self.max_scan_symbols} symbols")
+        print(f"Universe: {self.symbols} | Paper mode only")
         print(f"Max positions: {self.max_positions} | Per-name cap: {self.max_position_fraction:.1%}")
         print(f"Gross exposure cap: {self.max_gross_exposure:.1%} | Paper mode only")
         while True:
