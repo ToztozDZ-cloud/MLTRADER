@@ -3,8 +3,8 @@ from __future__ import annotations
 from decimal import Decimal, ROUND_DOWN
 
 from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, TimeInForce, AssetStatus, AssetClass
-from alpaca.trading.requests import MarketOrderRequest, GetAssetsRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, AssetStatus, AssetClass, QueryOrderStatus
+from alpaca.trading.requests import MarketOrderRequest, GetAssetsRequest, GetOrdersRequest
 
 from trading.config import API_KEY, API_SECRET, PAPER
 
@@ -23,6 +23,10 @@ class PaperBroker:
 
     def positions(self):
         return self.client.get_all_positions()
+
+    def open_order_symbols(self) -> set[str]:
+        request = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
+        return {order.symbol for order in self.client.get_orders(filter=request)}
 
     def position(self, symbol: str):
         for position in self.positions():
