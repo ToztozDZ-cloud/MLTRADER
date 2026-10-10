@@ -21,6 +21,9 @@ class PaperBroker:
     def account(self):
         return self.client.get_account()
 
+    def market_is_open(self) -> bool:
+        return bool(self.client.get_clock().is_open)
+
     def positions(self):
         return self.client.get_all_positions()
 
