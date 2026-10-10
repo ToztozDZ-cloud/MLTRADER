@@ -22,7 +22,7 @@ def test_load_market_data_sorts_and_filters_invalid_rows(tmp_path) -> None:
     )
     frame.loc[0, "Close"] = np.inf
     frame.loc[1, "Volume"] = -1.0
-    frame.loc[2, "High"] = 90.0
+    frame.loc[2, "HIGH"] = 90.0
 
     path = tmp_path / "bars.csv"
     frame.to_csv(path, index=False)
