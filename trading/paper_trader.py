@@ -209,6 +209,9 @@ class PaperTrader:
         return desired
 
     def step(self) -> None:
+        if not self.broker.market_is_open():
+            print("Market is closed; waiting for the next regular session.")
+            return
         self.step_count += 1
         if self.step_count % self.scan_interval_steps == 1:
             self._discover_symbols(force=True)
