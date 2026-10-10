@@ -389,9 +389,10 @@ class Trainer:
         if not datasets:
             raise ValueError("At least one market dataset is required.")
 
-        if len(datasets) == 1 and self.evaluator.using_cuda and len(agents) > 1:
-            population_result = self.evaluator.evaluate_population(agents, datasets[0])
-            return population_result.results
+        # Use the CPU reference evaluator for training until the vectorized GPU
+        # simulator reproduces the exact ObservationBuilder portfolio state and
+        # execution accounting. A faster path with different inputs can select
+        # a different champion, so correctness takes priority here.
 
         results = []
         total = len(agents)
