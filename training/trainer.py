@@ -102,7 +102,7 @@ class Trainer:
 
     def train(
         self,
-        market_data: pd.DataFrame,
+        market_data: pd.DataFrame | list[pd.DataFrame],
     ) -> Agent:
         if self.generations <= 0:
             raise ValueError(
