@@ -47,6 +47,9 @@ class AgentEvaluator:
         execute_on_next_bar: bool = True,
         fitness_calculator: FitnessCalculator | None = None,
         device: str | torch.device | None = None,
+        timeframe: str = "1d",
+        exchange_timezone: str = "America/New_York",
+        flatten_before_close_minutes: int = 10,
     ) -> None:
         self.lookback = int(lookback)
         self.initial_cash = float(initial_cash)
@@ -68,6 +71,10 @@ class AgentEvaluator:
         self.execute_on_next_bar = bool(
             execute_on_next_bar
         )
+        self.timeframe = str(timeframe).lower()
+        self.exchange_timezone = str(exchange_timezone)
+        self.flatten_before_close_minutes = max(0, int(flatten_before_close_minutes))
+        self.timeframe_minutes = int(self.timeframe[:-1]) if self.timeframe.endswith("m") else None
 
         self.fitness_calculator = (
             fitness_calculator
@@ -177,9 +184,24 @@ class AgentEvaluator:
                     target_fraction,
                 )
 
-            target_fraction *= (
-                self.max_position_fraction
-            )
+            # Intraday positions must be flat before the regular session ends.
+            # Signal is computed from the current completed bar; a flatten order
+            # is then simulated at the next bar's open, not its close.
+            if (
+                self.timeframe_minutes is not None
+                and self.flatten_before_close_minutes > 0
+                and "timestamp" in market.current_bar.index
+            ):
+                stamp = pd.Timestamp(market.current_bar["timestamp"])
+                if stamp.tzinfo is None:
+                    stamp = stamp.tz_localize("UTC")
+                local_stamp = stamp.tz_convert(self.exchange_timezone)
+                minutes = local_stamp.hour * 60 + local_stamp.minute
+                close_cutoff = 16 * 60 - self.flatten_before_close_minutes - self.timeframe_minutes
+                if minutes >= close_cutoff:
+                    target_fraction = 0.0
+
+            target_fraction *= self.max_position_fraction
 
             current_price = market.current_price
 
@@ -203,7 +225,13 @@ class AgentEvaluator:
             if next_bar is None:
                 break
 
-            execution_price = market.current_price
+            # A signal formed after bar t closes can only fill at the next
+            # bar's open. Using its close would leak within-bar information.
+            execution_price = (
+                float(next_bar["open"])
+                if self.execute_on_next_bar and "open" in next_bar.index
+                else market.current_price
+            )
 
             if self.execute_on_next_bar:
                 result = (
