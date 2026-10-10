@@ -18,3 +18,4 @@ universe:
   allow_fractional: true
   scan_interval_steps: 1
   flatten_before_close_minutes: 10
+  daily_loss_limit_fraction: 0.02
