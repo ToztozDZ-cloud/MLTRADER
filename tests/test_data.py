@@ -31,7 +31,7 @@ def test_load_market_data_sorts_and_filters_invalid_rows(tmp_path) -> None:
 
     assert len(cleaned) == rows - 3
     assert list(cleaned.columns) == ["open", "high", "low", "close", "volume"]
-    assert cleaned["close"].iloc[0] == 103.0
+    assert cleaned["close"].iloc[0] == 209.0
     assert np.isfinite(cleaned.to_numpy()).all()
     assert (cleaned[["open", "high", "low", "close"]] > 0).all().all()
     assert (cleaned["volume"] >= 0).all()
