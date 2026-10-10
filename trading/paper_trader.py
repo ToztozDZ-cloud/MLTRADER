@@ -149,11 +149,11 @@ class PaperTrader:
         candidates.sort(key=lambda item: abs(item[1]), reverse=True)
         selected = [item for item in candidates if abs(item[1]) >= self.min_signal][:self.max_positions]
         equity = float(account.equity)
-        current_gross = sum(abs(float(p.market_value)) for p in positions.values()) / max(equity, 1.0)
-        remaining_gross = max(0.0, self.max_gross_exposure - current_gross)
-        # Allocate up to the configured cap to each selected name, bounded by
-        # the total portfolio gross exposure cap.
-        desired: dict[str, tuple[float, float, pd.DataFrame]] = {}
+        # Selected positions receive a target allocation under the total gross
+        # exposure budget. Existing positions not selected below are targeted to
+        # zero, so their exposure does not consume this new target budget.
+        remaining_gross = self.max_gross_exposure
+        desired: dict[str, tuple[float, float, pd.DataFrame, float]] = {}
         for symbol, signal, price, _dollar_volume, frame in selected:
             if signal < 0 and not self.allow_short:
                 target = 0.0
@@ -161,7 +161,10 @@ class PaperTrader:
                 target = math.copysign(min(abs(signal), self.max_position_fraction), signal)
             allocation = min(abs(target), remaining_gross)
             remaining_gross -= allocation
-            desired[symbol] = (math.copysign(allocation, target) if allocation else 0.0, price, frame)
+            desired[symbol] = (
+                math.copysign(allocation, target) if allocation else 0.0,
+                price, frame, signal,
+            )
 
         # Flatten existing positions which are no longer selected. Avoid changing
         # any position for which fresh data was unavailable; that avoids blind orders.
@@ -169,7 +172,7 @@ class PaperTrader:
             if symbol not in desired and symbol in bars_by_symbol:
                 frame = self._clean_bars(bars_by_symbol[symbol])
                 if not frame.empty:
-                    desired[symbol] = (0.0, float(frame["close"].iloc[-1]), frame)
+                    desired[symbol] = (0.0, float(frame["close"].iloc[-1]), frame, 0.0)
         return desired
 
     def step(self) -> None:
@@ -184,11 +187,12 @@ class PaperTrader:
         account = self.broker.account()
         positions = {p.symbol: p for p in self.broker.positions()}
         orders_submitted = 0
-        for symbol, (target_fraction, price, frame) in desired.items():
+        for symbol, (target_fraction, price, frame, signal) in desired.items():
             if symbol in self.last_bar_time and self.last_bar_time[symbol] == frame.index[-1]:
                 continue
             self.last_bar_time[symbol] = frame.index[-1]
             self.last_prices[symbol] = price
+            self.last_signals[symbol] = signal
             position = positions.get(symbol)
             current_qty = float(position.qty) if position is not None else 0.0
             equity = float(account.equity)
@@ -206,7 +210,6 @@ class PaperTrader:
             updated_position = self.broker.position(symbol)
             updated_qty = float(updated_position.qty) if updated_position is not None else 0.0
             updated_account = self.broker.account()
-            signal = self.last_signals.get(symbol, target_fraction)
             self.logger.log(
                 symbol=symbol, price=price, agent_output=signal,
                 target_position=target_fraction, current_position=updated_qty,
