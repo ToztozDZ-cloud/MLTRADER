@@ -278,6 +278,13 @@ class PaperTrader:
             self._save_risk_state()
             print(f"Daily risk baseline reset: equity=${self.session_start_equity:,.2f}")
         if self.daily_loss_stop_triggered:
+            # A prior process may have stopped before flatten orders filled.
+            for position in self.broker.positions():
+                try:
+                    if position.symbol not in self.broker.open_order_symbols():
+                        self.broker.close_position(position.symbol)
+                except Exception as exc:
+                    print(f"LOSS-STOP RETRY FAILED {position.symbol}: {exc}")
             return True
         baseline = self.session_start_equity or float(account.equity)
         equity = float(account.equity)
