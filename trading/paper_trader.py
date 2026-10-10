@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import time
-from collections import defaultdict
 
 import numpy as np
 import pandas as pd
@@ -153,6 +152,7 @@ class PaperTrader:
                 continue
             position = positions.get(symbol)
             try:
+                self.agent.reset()
                 observation = self._observation(frame, account, position)
                 output = float(np.asarray(self.agent.act(observation)).reshape(-1)[0])
                 if not math.isfinite(output):
