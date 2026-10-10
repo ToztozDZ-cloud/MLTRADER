@@ -127,8 +127,6 @@ class Exchange:
                         * (
                             1.0
                             + self.costs.commission_rate
-                            + self.costs.spread_rate
-                            + self.costs.slippage_rate
                         )
                     )
                 )
