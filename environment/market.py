@@ -5,6 +5,8 @@ from typing import Optional
 
 import pandas as pd
 
+from .data import load_ohlcv_csv, validate_ohlcv
+
 
 class MarketEnvironment:
     """
@@ -39,7 +41,7 @@ class MarketEnvironment:
         if not path.exists():
             raise FileNotFoundError(f"Market data not found: {path}")
 
-        data = pd.read_csv(path)
+        data = load_ohlcv_csv(path, require_timestamp=False)
 
         return cls(
             data=data,
@@ -48,38 +50,7 @@ class MarketEnvironment:
 
     @staticmethod
     def _validate_data(data: pd.DataFrame) -> pd.DataFrame:
-        if data.empty:
-            raise ValueError("Market data is empty.")
-
-        normalized = data.copy()
-        normalized.columns = [
-            str(column).strip().lower()
-            for column in normalized.columns
-        ]
-
-        missing = MarketEnvironment.REQUIRED_COLUMNS - set(normalized.columns)
-
-        if missing:
-            raise ValueError(
-                f"Missing required market columns: {sorted(missing)}"
-            )
-
-        for column in MarketEnvironment.REQUIRED_COLUMNS:
-            normalized[column] = pd.to_numeric(
-                normalized[column],
-                errors="coerce",
-            )
-
-        normalized = normalized.dropna(
-            subset=list(MarketEnvironment.REQUIRED_COLUMNS)
-        )
-
-        if normalized.empty:
-            raise ValueError("No valid market rows remain after cleaning.")
-
-        normalized = normalized.reset_index(drop=True)
-
-        return normalized
+        return validate_ohlcv(data, timezone="UTC", regular_session_only=False)
 
     @property
     def current_price(self) -> float:

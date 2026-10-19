@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 
 import numpy as np
 
@@ -14,6 +15,7 @@ class Agent:
     genome: Genome
     hidden_size: int = 64
     memory_size: int = 0
+    metadata: dict = field(default_factory=dict)
 
     neural_agent: NeuralAgent = field(init=False)
     memory: AgentMemory = field(init=False)
@@ -42,6 +44,7 @@ class Agent:
             genome=self.genome.clone(),
             hidden_size=self.hidden_size,
             memory_size=self.memory_size,
+            metadata=deepcopy(self.metadata),
         )
 
         cloned.fitness = self.fitness

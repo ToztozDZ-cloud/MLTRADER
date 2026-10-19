@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import math
 
 from agents.agent import Agent
 
@@ -29,7 +30,25 @@ class EvolutionEngine:
         add_connection_rate: float = 0.15,
         remove_node_rate: float = 0.03,
         remove_connection_rate: float = 0.03,
+        diversity_enabled: bool = True,
     ) -> None:
+        bounded = {
+            "elitism": elitism,
+            "survival_rate": survival_rate,
+            "mutation_rate": mutation_rate,
+            "crossover_rate": crossover_rate,
+            "immigrant_rate": immigrant_rate,
+            "add_node_rate": add_node_rate,
+            "add_connection_rate": add_connection_rate,
+            "remove_node_rate": remove_node_rate,
+            "remove_connection_rate": remove_connection_rate,
+        }
+        for name, value in bounded.items():
+            if not math.isfinite(float(value)) or not 0.0 <= float(value) <= 1.0:
+                raise ValueError(f"{name} must be finite and in [0, 1]")
+        if survival_rate <= 0.0 or mutation_sigma < 0.0 or not math.isfinite(mutation_sigma):
+            raise ValueError("survival_rate must be positive and mutation_sigma non-negative")
+
         self.population = population
 
         self.elitism = elitism
@@ -43,15 +62,18 @@ class EvolutionEngine:
         self.add_connection_rate = add_connection_rate
         self.remove_node_rate = remove_node_rate
         self.remove_connection_rate = remove_connection_rate
+        self.diversity_enabled = bool(diversity_enabled)
 
         self.speciation = Speciation(
             compatibility_threshold=
             compatibility_threshold,
         )
 
-        self.history = []
+        self.history: list[dict[str, int | float]] = []
 
     def evolve(self) -> Agent:
+        if not self.population.agents:
+            raise ValueError("Cannot evolve an empty population")
         self.population.sort()
 
         champion = self.population.best().clone()
@@ -69,6 +91,8 @@ class EvolutionEngine:
             self.population.agents,
             self.elitism,
         )
+        for elite in elites:
+            elite.fitness = float("-inf")
 
         survivors = elitist_selection(
             self.population.agents,
@@ -128,8 +152,7 @@ class EvolutionEngine:
 
         self.population.generation += 1
 
-        self.speciation.classify(
-            self.population.agents
-        )
+        if self.diversity_enabled:
+            self.speciation.classify(self.population.agents)
 
         return champion

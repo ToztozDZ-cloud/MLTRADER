@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from .exchange import Exchange, OrderResult
 
@@ -21,7 +22,16 @@ class ExecutionEngine:
 
         target_position = float(target_position)
 
-        quantity = target_position - current_position
+        quantity = (
+            0.0
+            if math.isclose(
+                target_position,
+                current_position,
+                rel_tol=1e-12,
+                abs_tol=1e-12,
+            )
+            else target_position - current_position
+        )
 
         return self.exchange.execute_market_order(
             quantity=quantity,

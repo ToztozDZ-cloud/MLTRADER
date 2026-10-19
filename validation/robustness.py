@@ -27,49 +27,66 @@ class RobustnessValidator:
         initial_cash: float = 100_000.0,
         allow_short: bool = False,
         max_position_fraction: float = 1.0,
+        max_leverage: float = 1.0,
+        timeframe: str = "1d",
+        base_costs: TradingCosts | None = None,
+        execution_delay_bars: int = 0,
     ) -> None:
         self.lookback = lookback
         self.initial_cash = initial_cash
         self.allow_short = allow_short
         self.max_position_fraction = max_position_fraction
+        self.max_leverage = max_leverage
+        self.timeframe = timeframe
+        self.base_costs = base_costs or TradingCosts()
+        self.execution_delay_bars = int(execution_delay_bars)
+        if self.execution_delay_bars < 0:
+            raise ValueError("execution_delay_bars must be non-negative")
 
     def validate(
         self,
         agent: Agent,
         market_data: pd.DataFrame,
+        *,
+        start_step: int | None = None,
     ) -> list[RobustnessResult]:
+        base = self.base_costs
         scenarios = {
-            "normal": TradingCosts(
-                commission_rate=0.0005,
-                spread_rate=0.0002,
-                slippage_rate=0.0005,
+            "configured_costs": base,
+            "double_costs": TradingCosts(
+                commission_rate=base.commission_rate * 2.0,
+                spread_rate=base.spread_rate * 2.0,
+                slippage_rate=base.slippage_rate * 2.0,
             ),
-            "high_cost": TradingCosts(
-                commission_rate=0.0010,
-                spread_rate=0.0005,
-                slippage_rate=0.0010,
+            "fourfold_costs": TradingCosts(
+                commission_rate=base.commission_rate * 4.0,
+                spread_rate=base.spread_rate * 4.0,
+                slippage_rate=base.slippage_rate * 4.0,
             ),
-            "severe_cost": TradingCosts(
-                commission_rate=0.0020,
-                spread_rate=0.0010,
-                slippage_rate=0.0020,
-            ),
+            "one_bar_execution_delay": base,
         }
 
         results = []
 
         for name, costs in scenarios.items():
+            delay = self.execution_delay_bars + (
+                1 if name == "one_bar_execution_delay" else 0
+            )
             engine = BacktestEngine(
                 lookback=self.lookback,
                 initial_cash=self.initial_cash,
                 costs=costs,
                 allow_short=self.allow_short,
                 max_position_fraction=self.max_position_fraction,
+                max_leverage=self.max_leverage,
+                timeframe=self.timeframe,
+                execution_delay_bars=delay,
             )
 
             result = engine.run(
                 agent,
                 market_data,
+                start_step=start_step,
             )
 
             results.append(

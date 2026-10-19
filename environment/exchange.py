@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from .costs import TradingCosts
 from .portfolio import Portfolio
@@ -27,6 +28,8 @@ class Exchange:
         self.costs = costs
         self.allow_short = allow_short
         self.max_leverage = float(max_leverage)
+        if not math.isfinite(self.max_leverage) or self.max_leverage < 0.0:
+            raise ValueError("max_leverage must be finite and non-negative")
 
     def execute_market_order(
         self,
@@ -35,6 +38,11 @@ class Exchange:
     ) -> OrderResult:
         requested_quantity = float(quantity)
         market_price = float(market_price)
+
+        if not math.isfinite(requested_quantity):
+            raise ValueError("order quantity must be finite")
+        if not math.isfinite(market_price) or market_price <= 0.0:
+            raise ValueError("market_price must be finite and positive")
 
         if requested_quantity == 0.0:
             return self._empty_result(
@@ -115,13 +123,16 @@ class Exchange:
 
         # Prevent purchases that exceed available cash.
         if quantity > 0:
+            available_cash = self.portfolio.cash
+            if available_cash is None:
+                raise RuntimeError("portfolio cash has not been initialized")
             total_required = (
                 notional + transaction_cost
             )
 
-            if total_required > self.portfolio.cash:
+            if total_required > available_cash:
                 affordable = (
-                    self.portfolio.cash
+                    available_cash
                     / (
                         execution_price
                         * (

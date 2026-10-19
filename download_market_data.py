@@ -12,6 +12,8 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from dotenv import load_dotenv
 
+from environment.data import validate_ohlcv
+
 
 DEFAULT_SYMBOLS = ("SPY", "QQQ", "AAPL", "MSFT")
 
@@ -80,10 +82,28 @@ def main() -> int:
             print(f"{symbol}: no bars returned; skipped")
             continue
 
-        frame = frame.rename(columns={"timestamp": "timestamp"})
-        frame = frame[["timestamp", "open", "high", "low", "close", "volume"]]
-        frame = frame.sort_values("timestamp").drop_duplicates("timestamp")
-        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True).dt.strftime(
+        completed_cutoff = min(
+            pd.Timestamp(end).floor("5min"),
+            pd.Timestamp.now(tz="UTC").floor("5min"),
+        )
+        frame["timestamp"] = pd.to_datetime(frame["timestamp"], utc=True)
+        frame = frame.loc[frame["timestamp"] < completed_cutoff]
+        try:
+            frame = validate_ohlcv(
+                frame,
+                source=f"Alpaca {symbol} download",
+                timezone="America/New_York",
+                regular_session_only=True,
+                timeframe="5m",
+                require_timestamp=True,
+            )
+        except ValueError as exc:
+            print(f"{symbol}: invalid downloaded bars; skipped: {exc}")
+            continue
+        if frame.empty:
+            print(f"{symbol}: no completed regular-session bars; skipped")
+            continue
+        frame["timestamp"] = frame["timestamp"].dt.strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
         path = output_dir / f"{symbol}_5m.csv"

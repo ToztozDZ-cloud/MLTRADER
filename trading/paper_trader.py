@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import time
 from datetime import datetime, timezone
@@ -10,14 +11,17 @@ import numpy as np
 import pandas as pd
 
 from agents.serialization import AgentSerializer
+from environment.data import validate_ohlcv
+from environment.observation import ObservationBuilder
 from trading.alpaca_broker import PaperBroker
 from trading.config import (
-    DECISION_INTERVAL_SECONDS, LOG_PATH, LOOKBACK, MODEL_PATH, load_universe_config
+    DECISION_INTERVAL_SECONDS, LOG_PATH, LOOKBACK, MODEL_PATH, TIMEFRAME_MINUTES,
+    load_universe_config,
 )
 from trading.market_data import MarketData
 from trading.trade_logger import TradeLogger
 
-FEATURE_COUNT = LOOKBACK * 5 + 4
+FEATURE_COUNT = ObservationBuilder.input_size(LOOKBACK)
 
 
 class PaperTrader:
@@ -55,13 +59,13 @@ class PaperTrader:
         self._load_risk_state()
 
         print(f"Loading trained agent from {MODEL_PATH}...")
-        self.agent = AgentSerializer.load(MODEL_PATH)
+        self.agent = AgentSerializer.load(
+            MODEL_PATH,
+            expected_observation=ObservationBuilder.schema(LOOKBACK),
+            expected_timeframe=f"{TIMEFRAME_MINUTES}m",
+            require_metadata=True,
+        )
         self.agent.reset()
-        if self.agent.genome.input_size != FEATURE_COUNT:
-            raise ValueError(
-                f"Model expects {self.agent.genome.input_size} inputs; trader builds {FEATURE_COUNT}. "
-                "Retrain/export with matching lookback and ObservationBuilder."
-            )
         self.market = MarketData()
         self.broker = PaperBroker()
         self.logger = TradeLogger(LOG_PATH)
@@ -98,7 +102,7 @@ class PaperTrader:
             remaining = [symbol for symbol in all_symbols if symbol not in set(chosen)]
             slots = max(0, self.max_scan_symbols - len(chosen))
             if slots and len(remaining) > slots:
-                indices = np.linspace(0, len(remaining) - 1, num=slots, dtype=int)
+                indices: np.ndarray = np.linspace(0, len(remaining) - 1, num=slots, dtype=int)
                 chosen.extend(remaining[index] for index in indices)
             else:
                 chosen.extend(remaining[:slots])
@@ -110,17 +114,19 @@ class PaperTrader:
 
     @staticmethod
     def _clean_bars(bars: pd.DataFrame) -> pd.DataFrame:
-        frame = bars.copy()
-        frame.columns = [str(c).lower() for c in frame.columns]
-        columns = ["open", "high", "low", "close", "volume"]
-        missing = [c for c in columns if c not in frame.columns]
-        if missing:
-            raise ValueError(f"Market data missing columns: {missing}")
-        frame = frame[columns].apply(pd.to_numeric, errors="coerce")
-        frame = frame.replace([np.inf, -np.inf], np.nan).dropna().sort_index()
-        if len(frame) < LOOKBACK or (frame["close"] <= 0).any():
+        if bars.empty:
             return pd.DataFrame()
-        return frame.tail(LOOKBACK)
+        checked = validate_ohlcv(
+            bars,
+            source="paper market data",
+            timezone="America/New_York",
+            regular_session_only=True,
+            timeframe=f"{TIMEFRAME_MINUTES}m",
+            require_timestamp=True,
+        )
+        if len(checked) < LOOKBACK:
+            return pd.DataFrame()
+        return checked.tail(LOOKBACK).set_index("timestamp")
 
     @staticmethod
     def _bars_are_fresh(bars: pd.DataFrame, max_age_minutes: int = 10) -> bool:
@@ -134,35 +140,36 @@ class PaperTrader:
         age_seconds = (pd.Timestamp.now(tz="UTC") - latest).total_seconds()
         return -60.0 <= age_seconds <= max_age_minutes * 60.0
 
+    @staticmethod
+    def _client_order_id(symbol: str, bar_time, target_quantity: float) -> str:
+        identity = f"{symbol}|{pd.Timestamp(bar_time).isoformat()}|{float(target_quantity):.8f}"
+        return "mltrader-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+
     def _observation(self, bars: pd.DataFrame, account, position) -> np.ndarray:
         frame = self._clean_bars(bars)
         if frame.empty:
             raise ValueError("Insufficient valid bars.")
-        values = frame[["open", "high", "low", "close", "volume"]].to_numpy(dtype=np.float32)
-        price = float(values[-1, 3])
-        normalized = values.copy()
-        normalized[:, :4] = normalized[:, :4] / price - 1.0
-        volume_mean = float(np.mean(values[:, 4]))
-        normalized[:, 4] = values[:, 4] / volume_mean - 1.0 if volume_mean > 0 else 0.0
-
+        price = float(frame["close"].iloc[-1])
         equity = float(account.equity)
         cash = float(account.cash)
         quantity = float(position.qty) if position is not None else 0.0
         average_entry = float(position.avg_entry_price) if position is not None else 0.0
         if not math.isfinite(equity) or equity <= 0:
             raise RuntimeError(f"Invalid account equity: {equity}")
-        portfolio_state = np.asarray([
+        portfolio_state: np.ndarray = np.asarray([
             cash / equity,
             quantity * price / equity,
             quantity / max(1.0, abs(quantity)),
             ((price - average_entry) * quantity / equity) if quantity else 0.0,
         ], dtype=np.float32)
-        observation = np.concatenate([normalized.flatten(), portfolio_state]).astype(np.float32)
+        observation = ObservationBuilder.build_from_history(
+            frame.reset_index(), portfolio_state, LOOKBACK
+        )
         if observation.shape != (FEATURE_COUNT,) or not np.isfinite(observation).all():
             raise ValueError(f"Invalid observation vector: shape={observation.shape}")
         return observation
 
-    def _scan(self) -> dict[str, tuple[float, float, pd.DataFrame]]:
+    def _scan(self) -> dict[str, tuple[float, float, pd.DataFrame, float]]:
         self._discover_symbols()
         bars_by_symbol = self.market.get_recent_bars_batched(
             self.symbols, limit=LOOKBACK, batch_size=self.batch_size
@@ -213,7 +220,11 @@ class PaperTrader:
         reserved_gross = sum(
             abs(float(position.market_value)) / max(equity, 1.0)
             for symbol, position in positions.items()
-            if symbol not in bars_by_symbol or symbol in pending_symbols
+            if (
+                symbol not in bars_by_symbol
+                or symbol in pending_symbols
+                or not self._bars_are_fresh(bars_by_symbol[symbol])
+            )
         )
         # Reserve one per-name allocation for pending orders that do not yet
         # have a position, since a market order may fill after this scan.
@@ -240,7 +251,10 @@ class PaperTrader:
         # any position for which fresh data was unavailable; that avoids blind orders.
         for symbol, position in positions.items():
             if symbol not in desired and symbol in bars_by_symbol and symbol not in pending_symbols:
-                frame = self._clean_bars(bars_by_symbol[symbol])
+                raw_frame = bars_by_symbol[symbol]
+                if not self._bars_are_fresh(raw_frame):
+                    continue
+                frame = self._clean_bars(raw_frame)
                 if not frame.empty:
                     desired[symbol] = (0.0, float(frame["close"].iloc[-1]), frame, 0.0)
         return desired
@@ -248,14 +262,31 @@ class PaperTrader:
     def _load_risk_state(self) -> None:
         try:
             state = json.loads(self.risk_state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                raise ValueError("risk state must be a JSON object")
+            required = {"session_date", "session_start_equity", "daily_loss_stop_triggered"}
+            if not required.issubset(state):
+                raise ValueError("risk state is missing required fields")
             self.session_date = state.get("session_date")
             baseline = state.get("session_start_equity")
             self.session_start_equity = float(baseline) if baseline is not None else None
             self.daily_loss_stop_triggered = bool(state.get("daily_loss_stop_triggered", False))
+            if self.session_date is not None:
+                if not isinstance(self.session_date, str):
+                    raise ValueError("session_date must be a date string")
+                pd.Timestamp(self.session_date).date()
+            elif self.session_start_equity is not None or self.daily_loss_stop_triggered:
+                raise ValueError("risk baseline or stop cannot exist without a session date")
+            if self.session_start_equity is not None and (
+                not math.isfinite(self.session_start_equity) or self.session_start_equity <= 0
+            ):
+                raise ValueError("session_start_equity must be finite and positive")
+            if not isinstance(state.get("daily_loss_stop_triggered", False), bool):
+                raise ValueError("daily_loss_stop_triggered must be boolean")
         except FileNotFoundError:
             return
         except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-            print(f"WARNING: could not load daily risk state: {exc}")
+            raise RuntimeError(f"Could not load paper daily risk state; refusing to trade: {exc}") from exc
 
     def _save_risk_state(self) -> None:
         self.risk_state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -265,29 +296,34 @@ class PaperTrader:
             "daily_loss_stop_triggered": self.daily_loss_stop_triggered,
         }
         temporary = self.risk_state_path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        temporary.write_text(json.dumps(state, indent=2, allow_nan=False), encoding="utf-8")
         temporary.replace(self.risk_state_path)
 
     def _enforce_daily_loss_stop(self, account) -> bool:
         local_now = pd.Timestamp.now(tz="America/New_York")
         today = local_now.date().isoformat()
+        account_equity = float(account.equity)
+        if not math.isfinite(account_equity) or account_equity <= 0.0:
+            raise RuntimeError("Broker equity is invalid; refusing paper trading")
         if self.session_date != today:
             self.session_date = today
-            self.session_start_equity = float(account.equity)
+            self.session_start_equity = account_equity
             self.daily_loss_stop_triggered = False
             self._save_risk_state()
             print(f"Daily risk baseline reset: equity=${self.session_start_equity:,.2f}")
         if self.daily_loss_stop_triggered:
             # A prior process may have stopped before flatten orders filled.
+            self.broker.cancel_open_orders()
+            pending = self.broker.open_order_symbols()
             for position in self.broker.positions():
                 try:
-                    if position.symbol not in self.broker.open_order_symbols():
+                    if position.symbol not in pending:
                         self.broker.close_position(position.symbol)
                 except Exception as exc:
                     print(f"LOSS-STOP RETRY FAILED {position.symbol}: {exc}")
             return True
         baseline = self.session_start_equity or float(account.equity)
-        equity = float(account.equity)
+        equity = account_equity
         if baseline > 0 and equity <= baseline * (1.0 - self.daily_loss_limit_fraction):
             self.daily_loss_stop_triggered = True
             self._save_risk_state()
@@ -296,9 +332,11 @@ class PaperTrader:
                 f"{self.daily_loss_limit_fraction:.1%} loss limit; flattening and "
                 "blocking further entries for today."
             )
+            self.broker.cancel_open_orders()
+            pending = self.broker.open_order_symbols()
             for position in self.broker.positions():
                 try:
-                    if position.symbol not in self.broker.open_order_symbols():
+                    if position.symbol not in pending:
                         self.broker.close_position(position.symbol)
                 except Exception as exc:
                     print(f"LOSS-STOP CLOSE FAILED {position.symbol}: {exc}")
@@ -326,9 +364,11 @@ class PaperTrader:
                 f"Regular-session close in {max(0.0, minutes_to_close):.1f} min; "
                 "flattening paper positions."
             )
+            self.broker.cancel_open_orders()
+            pending = self.broker.open_order_symbols()
             for position in self.broker.positions():
                 try:
-                    if position.symbol not in self.broker.open_order_symbols():
+                    if position.symbol not in pending:
                         order = self.broker.close_position(position.symbol)
                         if order is not None:
                             print(f"CLOSE {position.symbol}: order_id={order.id}")
@@ -361,8 +401,21 @@ class PaperTrader:
             equity = float(account.equity)
             target_qty = equity * target_fraction / price
             delta = target_qty - current_qty
+            client_order_id = self._client_order_id(symbol, frame.index[-1], target_qty)
             try:
-                order = self.broker.submit_delta(symbol, delta, allow_short=self.allow_short)
+                reference_prices = dict(self.last_prices)
+                reference_prices.update({name: values[1] for name, values in desired.items()})
+                order = self.broker.submit_delta(
+                    symbol,
+                    delta,
+                    allow_short=self.allow_short,
+                    client_order_id=client_order_id,
+                    price=price,
+                    max_position_fraction=self.max_position_fraction,
+                    max_gross_exposure=self.max_gross_exposure,
+                    max_positions=self.max_positions,
+                    reference_prices=reference_prices,
+                )
             except Exception as exc:
                 print(f"ORDER FAILED {symbol}: {exc}")
                 continue

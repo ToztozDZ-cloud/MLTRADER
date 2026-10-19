@@ -1,19 +1,25 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 
 @dataclass
 class Portfolio:
     initial_cash: float
-    cash: float = 0.0
+    cash: float | None = None
     position: float = 0.0
     average_entry_price: float = 0.0
     realized_pnl: float = 0.0
 
     def __post_init__(self) -> None:
         self.initial_cash = float(self.initial_cash)
-        self.cash = self.initial_cash if self.cash == 0.0 else float(self.cash)
+        cash = self.initial_cash if self.cash is None else float(self.cash)
+        if not math.isfinite(self.initial_cash) or self.initial_cash <= 0.0:
+            raise ValueError("initial_cash must be finite and positive")
+        if not math.isfinite(cash):
+            raise ValueError("cash must be finite")
+        self.cash = cash
 
     def reset(self) -> None:
         self.cash = self.initial_cash
@@ -25,6 +31,8 @@ class Portfolio:
         return self.position * float(price)
 
     def equity(self, price: float) -> float:
+        if self.cash is None:
+            raise RuntimeError("portfolio cash has not been initialized")
         return self.cash + self.market_value(price)
 
     def unrealized_pnl(self, price: float) -> float:
@@ -43,8 +51,17 @@ class Portfolio:
         price = float(price)
         transaction_cost = float(transaction_cost)
 
+        if not math.isfinite(quantity):
+            raise ValueError("trade quantity must be finite")
+        if not math.isfinite(price) or price <= 0.0:
+            raise ValueError("trade price must be finite and positive")
+        if not math.isfinite(transaction_cost) or transaction_cost < 0.0:
+            raise ValueError("transaction_cost must be finite and non-negative")
+
         if quantity == 0.0:
             return
+        if self.cash is None:
+            raise RuntimeError("portfolio cash has not been initialized")
 
         old_position = self.position
         new_position = old_position + quantity

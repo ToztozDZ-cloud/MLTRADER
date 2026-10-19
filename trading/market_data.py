@@ -7,14 +7,16 @@ from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
-from trading.config import API_KEY, API_SECRET, LOOKBACK, TIMEFRAME_MINUTES
+from environment.data import validate_ohlcv
+from trading.config import LOOKBACK, TIMEFRAME_MINUTES, require_paper_credentials
 
 
 class MarketData:
     """Batched Alpaca market data. Each request is deliberately kept small."""
 
     def __init__(self) -> None:
-        self.client = StockHistoricalDataClient(API_KEY, API_SECRET)
+        api_key, api_secret = require_paper_credentials()
+        self.client = StockHistoricalDataClient(api_key, api_secret)
 
     @staticmethod
     def _timeframe():
@@ -67,8 +69,17 @@ class MarketData:
             return result
         index = pd.to_datetime(result.index, utc=True, errors="coerce")
         cutoff = pd.Timestamp.now(tz="UTC").floor(f"{TIMEFRAME_MINUTES}min")
-        result = result.loc[index < cutoff]
-        return result
+        result = result.loc[index < cutoff].copy()
+        result["timestamp"] = index[index < cutoff]
+        checked = validate_ohlcv(
+            result,
+            source="Alpaca paper market data",
+            timezone="America/New_York",
+            regular_session_only=True,
+            timeframe=f"{TIMEFRAME_MINUTES}m",
+            require_timestamp=True,
+        )
+        return checked.set_index("timestamp")
 
     def get_recent_bars_batched(
         self, symbols: list[str], limit: int = LOOKBACK, batch_size: int = 50

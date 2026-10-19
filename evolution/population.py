@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import math
 
 from agents.agent import Agent
 from agents.genome import (
@@ -166,14 +167,19 @@ class Population:
         )
 
     def best(self) -> Agent:
+        if not self.agents:
+            raise ValueError("Cannot select a champion from an empty population")
+        valid = [agent for agent in self.agents if math.isfinite(float(agent.fitness))]
+        if not valid:
+            raise ValueError("Population has no finite fitness values")
         return max(
-            self.agents,
+            valid,
             key=lambda agent: agent.fitness,
         )
 
     def sort(self) -> None:
         self.agents.sort(
-            key=lambda agent: agent.fitness,
+            key=lambda agent: agent.fitness if math.isfinite(float(agent.fitness)) else float("-inf"),
             reverse=True,
         )
 

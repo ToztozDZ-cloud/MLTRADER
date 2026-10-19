@@ -35,6 +35,12 @@ class TradingCosts:
         """Explicit cash fee only; spread/slippage are in execution_price."""
         return self.commission(notional)
 
+    def estimated_execution_cost(self, notional: float) -> float:
+        """Estimate all-in friction; spread/slippage are already reflected in fills."""
+        return abs(float(notional)) * (
+            self.commission_rate + self.spread_rate / 2.0 + self.slippage_rate
+        )
+
     def execution_price(self, market_price: float, quantity: float) -> float:
         """Apply half-spread and adverse slippage exactly once."""
         market_price = float(market_price)

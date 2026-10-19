@@ -22,6 +22,13 @@ class ObservationBuilder:
         "close",
         "volume",
     ]
+    PORTFOLIO_FEATURES = (
+        "cash_over_equity",
+        "signed_market_value_over_equity",
+        "position_sign",
+        "unrealized_pnl_over_equity",
+    )
+    SCHEMA_VERSION = 1
 
     def __init__(self, lookback: int = 64) -> None:
         if lookback <= 0:
@@ -36,23 +43,49 @@ class ObservationBuilder:
     ) -> np.ndarray:
         history = market.get_observation_window(self.lookback)
 
-        values = history[self.MARKET_COLUMNS].to_numpy(
-            dtype=np.float32
-        )
-
-        values = self._normalize_market_data(values)
-
         portfolio_state = self._portfolio_state(
             market=market,
             portfolio=portfolio,
         )
+        return self.build_from_history(history, portfolio_state, self.lookback)
 
-        return np.concatenate(
-            [
-                values.flatten(),
-                portfolio_state,
-            ]
-        ).astype(np.float32)
+    @classmethod
+    def build_from_history(
+        cls,
+        history: pd.DataFrame,
+        portfolio_state: np.ndarray,
+        lookback: int,
+    ) -> np.ndarray:
+        if lookback <= 0 or len(history) != lookback:
+            raise ValueError(f"Expected exactly {lookback} bars of observation history")
+        missing = set(cls.MARKET_COLUMNS) - set(history.columns)
+        if missing:
+            raise ValueError(f"Observation history is missing fields: {sorted(missing)}")
+        values = history[cls.MARKET_COLUMNS].to_numpy(dtype=np.float32)
+        values = cls._normalize_market_data(values)
+        state = np.asarray(portfolio_state, dtype=np.float32).reshape(-1)
+        if state.shape != (len(cls.PORTFOLIO_FEATURES),):
+            raise ValueError("Portfolio state does not match the observation schema")
+        observation = np.concatenate([values.flatten(), state]).astype(np.float32)
+        if not np.isfinite(observation).all():
+            raise ValueError("Observation contains non-finite values")
+        return observation
+
+    @classmethod
+    def input_size(cls, lookback: int) -> int:
+        return int(lookback) * len(cls.MARKET_COLUMNS) + len(cls.PORTFOLIO_FEATURES)
+
+    @classmethod
+    def schema(cls, lookback: int) -> dict[str, object]:
+        return {
+            "version": cls.SCHEMA_VERSION,
+            "market_features": list(cls.MARKET_COLUMNS),
+            "market_feature_order": "oldest_to_newest",
+            "lookback": int(lookback),
+            "portfolio_features": list(cls.PORTFOLIO_FEATURES),
+            "input_size": cls.input_size(lookback),
+            "action_semantics": "signed_target_fraction",
+        }
 
     @staticmethod
     def _normalize_market_data(
@@ -65,7 +98,7 @@ class ObservationBuilder:
         if len(values) == 0:
             return values
 
-        reference_price = values[-1, 3]
+        reference_price = float(values[-1, 3])
 
         if reference_price <= 0:
             reference_price = 1.0
@@ -99,6 +132,8 @@ class ObservationBuilder:
 
         if equity <= 0:
             equity = 1.0
+        if portfolio.cash is None:
+            raise RuntimeError("portfolio cash has not been initialized")
 
         return np.array(
             [

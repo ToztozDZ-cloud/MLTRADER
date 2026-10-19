@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import random
 from pathlib import Path
 
 import numpy as np
@@ -9,10 +11,12 @@ import torch
 import yaml
 
 from environment.costs import TradingCosts
+from environment.data import load_ohlcv_csv
+from environment.observation import ObservationBuilder
 from evolution.evolution import EvolutionEngine
 from evolution.population import Population
 from training.evaluator import AgentEvaluator
-from training.fitness import FitnessCalculator
+from training.fitness import FitnessCalculator, periods_per_year_for_timeframe
 from training.trainer import Trainer
 
 
@@ -74,94 +78,23 @@ def load_market_data(
     exchange_timezone: str = "America/New_York",
     timeframe: str | None = None,
 ) -> pd.DataFrame:
-    """Load validated OHLCV data and preserve timestamps for intraday checks.
-
-    Timestamped intraday bars are sorted, deduplicated and (by default)
-    restricted to the US regular session, 09:30 inclusive to 16:00 exclusive.
-    Daily data is not session-filtered.
-    """
-    if not path.exists():
-        raise FileNotFoundError(f"Market data file not found: {path}")
-
-    data = pd.read_csv(path)
-    if data.empty:
-        raise ValueError(f"Market data is empty: {path}")
-
-    column_lookup = {str(column).strip().lower(): column for column in data.columns}
-    required_columns = {"open", "high", "low", "close", "volume"}
-    missing = required_columns - set(column_lookup)
-    if missing:
-        raise ValueError(f"Market data is missing required columns: {sorted(missing)}")
-
-    timestamp_column = next(
-        (column_lookup[name] for name in ("timestamp", "datetime", "date", "time")
-         if name in column_lookup),
-        None,
+    """Compatibility wrapper over the shared OHLCV validation pipeline."""
+    return load_ohlcv_csv(
+        path,
+        timezone=exchange_timezone,
+        regular_session_only=regular_session_only,
+        timeframe=timeframe,
+        require_timestamp=True,
+        minimum_rows=100,
     )
-    if timestamp_column is not None:
-        data["timestamp"] = pd.to_datetime(data[timestamp_column], errors="coerce", utc=True)
-        data = data.dropna(subset=["timestamp"]).sort_values("timestamp", kind="stable")
-        data = data.drop_duplicates(subset=["timestamp"], keep="last")
 
-    rename_map = {
-        original: normalized
-        for normalized, original in column_lookup.items()
-        if normalized in required_columns
-    }
-    data = data.rename(columns=rename_map)
-    keep_columns = (["timestamp"] if timestamp_column is not None else []) + [
-        "open", "high", "low", "close", "volume"
-    ]
-    data = data[keep_columns].copy()
 
-    for column in ("open", "high", "low", "close", "volume"):
-        data[column] = pd.to_numeric(data[column], errors="coerce")
-
-    data = data.replace([np.inf, -np.inf], np.nan).dropna(
-        subset=["open", "high", "low", "close", "volume"]
-    )
-    valid_rows = (
-        (data[["open", "high", "low", "close"]] > 0).all(axis=1)
-        & (data["high"] >= data["low"])
-        & (data["volume"] >= 0)
-    )
-    data = data.loc[valid_rows].copy()
-
-    if timestamp_column is not None and regular_session_only and len(data) > 2:
-        deltas = data["timestamp"].sort_values().diff().dropna()
-        is_intraday = not deltas.empty and deltas.median() < pd.Timedelta(days=1)
-        if is_intraday:
-            local_time = data["timestamp"].dt.tz_convert(exchange_timezone)
-            minute_of_day = local_time.dt.hour * 60 + local_time.dt.minute
-            session_mask = (minute_of_day >= 9 * 60 + 30) & (minute_of_day < 16 * 60)
-            data = data.loc[session_mask].copy()
-
-    if timeframe and str(timeframe).lower().endswith("m"):
-        if timestamp_column is None:
-            raise ValueError(
-                f"{timeframe} intraday training requires a timestamp/date column: {path}"
-            )
-        expected_minutes = int(str(timeframe).lower()[:-1])
-        deltas = data["timestamp"].sort_values().diff().dropna()
-        intraday_deltas = deltas[deltas <= pd.Timedelta(hours=1)]
-        if intraday_deltas.empty:
-            raise ValueError(f"No intraday timestamp intervals found in {path}.")
-        median_minutes = intraday_deltas.median().total_seconds() / 60.0
-        if not (expected_minutes * 0.5 <= median_minutes <= expected_minutes * 1.5):
-            raise ValueError(
-                f"{path} appears to use {median_minutes:g}-minute bars, "
-                f"but configuration requires {timeframe} bars."
-            )
-
-    data = data.reset_index(drop=True)
-    if len(data) < 100:
-        raise ValueError(
-            "Market data must contain at least 100 valid rows after cleaning "
-            f"and session filtering. Found {len(data)}."
-        )
-    if (data[["open", "high", "low", "close"]] <= 0).any().any():
-        raise ValueError("OHLC prices must be positive.")
-    return data
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def build_population(
@@ -211,6 +144,7 @@ def build_evolution_engine(
         "diversity",
         {},
     )
+    diversity_enabled = bool(diversity_config.get("enabled", True))
 
     mutation_enabled = bool(
         mutation_config.get(
@@ -285,16 +219,14 @@ def build_evolution_engine(
         mutation_rate=mutation_rate,
         mutation_sigma=mutation_sigma,
         crossover_rate=float(
-            crossover_config.get(
-                "rate",
-                0.75,
-            )
+            crossover_config.get("rate", 0.75)
+            if bool(crossover_config.get("enabled", True))
+            else 0.0
         ),
         immigrant_rate=float(
-            diversity_config.get(
-                "random_immigrant_rate",
-                0.05,
-            )
+            diversity_config.get("random_immigrant_rate", 0.05)
+            if diversity_enabled
+            else 0.0
         ),
         compatibility_threshold=float(
             diversity_config.get(
@@ -306,6 +238,7 @@ def build_evolution_engine(
         add_connection_rate=add_connection_rate,
         remove_node_rate=remove_node_rate,
         remove_connection_rate=remove_connection_rate,
+        diversity_enabled=diversity_enabled,
     )
 
 
@@ -320,18 +253,8 @@ def build_fitness_calculator(
         )
     )
 
-    bars_per_session = {
-        "1m": 390.0,
-        "5m": 78.0,
-        "10m": 39.0,
-        "15m": 26.0,
-        "30m": 13.0,
-        "1h": 6.5,
-        "1d": 1.0,
-    }.get(str(timeframe).lower(), 1.0)
-
     return FitnessCalculator(
-        periods_per_year=252.0 * bars_per_session,
+        periods_per_year=periods_per_year_for_timeframe(timeframe),
         return_weight=float(
             fitness_config.get(
                 "return_weight",
@@ -362,6 +285,9 @@ def build_fitness_calculator(
                 0.10,
             )
         ),
+        max_drawdown_limit=float(fitness_config.get("max_drawdown_limit", 0.50)),
+        drawdown_excess_penalty=float(fitness_config.get("drawdown_excess_penalty", 2.0)),
+        sharpe_cap=float(fitness_config.get("sharpe_cap", 5.0)),
     )
 
 
@@ -448,6 +374,9 @@ def main() -> None:
             "the training configuration."
         ),
     )
+    parser.add_argument("--seed", type=int, default=None, help="Override the configured reproducibility seed.")
+    parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR)
+    parser.add_argument("--champion-dir", type=Path, default=CHAMPION_DIR)
 
     args = parser.parse_args()
 
@@ -482,9 +411,24 @@ def main() -> None:
     ]
     market_data = market_datasets[0] if len(market_datasets) == 1 else market_datasets
 
+    evaluation_config = training_config.get("training", {}).get("evaluation", {})
+    seed = int(args.seed if args.seed is not None else training_config["training"].get("seed", 0))
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
     training_section = training_config[
         "training"
     ]
+
+    parallel_config = training_section.get("parallel", {})
+    if bool(parallel_config.get("enabled", False)):
+        raise ValueError(
+            "Parallel population evaluation is not supported by the current CPU reference evaluator; "
+            "set training.parallel.enabled to false."
+        )
 
     market_section = market_config.get(
         "market",
@@ -513,21 +457,20 @@ def main() -> None:
         )
     )
 
-    input_size = (
-        lookback * 5
-    ) + 4
+    input_size = ObservationBuilder.input_size(lookback)
 
     output_size = 1
 
+    champion_path = args.champion_dir / CHAMPION_FILENAME
     if args.reset_champion:
-        if CHAMPION_PATH.exists():
-            CHAMPION_PATH.unlink()
+        if champion_path.exists():
+            champion_path.unlink()
 
             print(
                 "Persistent champion removed:"
             )
             print(
-                f"  {CHAMPION_PATH}"
+                f"  {champion_path}"
             )
         else:
             print(
@@ -573,6 +516,7 @@ def main() -> None:
         timeframe=str(data_config.get("timeframe", "1d")),
         exchange_timezone=str(data_config.get("timezone", "America/New_York")),
         flatten_before_close_minutes=int(data_config.get("flatten_before_close_minutes", 10)),
+        execution_delay_bars=int(execution_config.get("execution_delay_bars", 0)),
         costs=costs,
         allow_short=bool(
             trading_config.get(
@@ -615,9 +559,32 @@ def main() -> None:
         evolution=evolution,
         evaluator=evaluator,
         generations=generations,
-        checkpoint_dir=CHECKPOINT_DIR,
-        champion_dir=CHAMPION_DIR,
+        checkpoint_dir=args.checkpoint_dir,
+        champion_dir=args.champion_dir,
         champion_filename=CHAMPION_FILENAME,
+        episodes_per_agent=int(evaluation_config.get("episodes_per_agent", 1)),
+        episode_bars=int(evaluation_config.get("episode_bars", 0)),
+        randomize_start=bool(evaluation_config.get("randomize_start", False)),
+        randomize_instrument=bool(evaluation_config.get("randomize_instrument", False)),
+        randomize_market_regime=bool(evaluation_config.get("randomize_market_regime", False)),
+        seed=seed,
+        model_metadata={
+            "dataset_hashes": [file_sha256(path) for path in args.data],
+            "training_config_sha256": hashlib.sha256(
+                yaml.safe_dump(training_config, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+            "market_config_sha256": hashlib.sha256(
+                yaml.safe_dump(market_config, sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+            "timeframe": configured_timeframe,
+            "instruments": [
+                str(frame["symbol"].iloc[0]) if "symbol" in frame else str(path.stem)
+                for frame, path in zip(market_datasets, args.data)
+            ],
+        },
+        checkpoint_every=int(training_section.get("checkpoints", {}).get("save_every", 1)),
+        keep_champions=bool(training_section.get("checkpoints", {}).get("keep_champions", True)),
+        keep_archives=bool(training_section.get("checkpoints", {}).get("keep_archives", True)),
     )
 
     population_size = int(
@@ -626,9 +593,7 @@ def main() -> None:
         ]
     )
 
-    champion_exists = (
-        CHAMPION_PATH.exists()
-    )
+    champion_exists = champion_path.exists()
 
     print()
     print("=" * 72)
@@ -655,6 +620,8 @@ def main() -> None:
     print(
         f"Generations:        {generations}"
     )
+    print(f"Random seed:        {seed}")
+    print(f"Episodes per agent: {int(evaluation_config.get('episodes_per_agent', 1))}")
     print(
         "Initial capital:    "
         f"${initial_cash:,.2f}"
@@ -691,7 +658,7 @@ def main() -> None:
         f"{champion_exists}"
     )
     print(
-        f"Champion path:      {CHAMPION_PATH}"
+        f"Champion path:      {champion_path}"
     )
     print("=" * 72)
     print()
@@ -710,7 +677,7 @@ def main() -> None:
     )
     print(
         "Champion saved to:  "
-        f"{CHAMPION_PATH}"
+        f"{champion_path}"
     )
     print("=" * 72)
 

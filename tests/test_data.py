@@ -7,48 +7,65 @@ import pytest
 from evolve import load_market_data
 
 
-def test_load_market_data_sorts_and_filters_invalid_rows(tmp_path) -> None:
-    rows = 110
+def _valid_daily_frame(rows: int = 110) -> pd.DataFrame:
     dates = pd.date_range("2024-01-01", periods=rows, freq="D")
-    frame = pd.DataFrame(
+    close = np.arange(rows, dtype=float) + 100.0
+    return pd.DataFrame(
         {
             "Date": dates[::-1].astype(str),
             " Open ": np.full(rows, 100.0),
-            "HIGH": np.full(rows, 102.0),
+            "HIGH": close[::-1] + 1.0,
             "Low": np.full(rows, 98.0),
-            "Close": np.arange(rows, dtype=float) + 100.0,
+            "Close": close[::-1],
             "Volume": np.full(rows, 1000.0),
         }
     )
-    frame.loc[0, "Close"] = np.inf
-    frame.loc[1, "Volume"] = -1.0
-    frame.loc[2, "HIGH"] = 90.0
 
+
+def test_load_market_data_normalizes_sorts_and_preserves_instrument(tmp_path) -> None:
     path = tmp_path / "bars.csv"
+    _valid_daily_frame().to_csv(path, index=False)
+
+    cleaned = load_market_data(path, regular_session_only=False)
+
+    assert list(cleaned.columns) == ["timestamp", "open", "high", "low", "close", "volume", "symbol"]
+    assert cleaned["timestamp"].is_monotonic_increasing
+    assert cleaned["close"].iloc[0] == 100.0
+    assert set(cleaned["symbol"]) == {"BARS"}
+    assert np.isfinite(cleaned[["open", "high", "low", "close", "volume"]].to_numpy()).all()
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("Close", np.inf, "close must be finite"),
+        ("Volume", -1.0, "volume must be non-negative"),
+        ("HIGH", 90.0, "inconsistent OHLC"),
+    ],
+)
+def test_load_market_data_rejects_invalid_rows(tmp_path, column, value, message) -> None:
+    frame = _valid_daily_frame()
+    frame.loc[0, column] = value
+    path = tmp_path / "malformed.csv"
     frame.to_csv(path, index=False)
 
-    cleaned = load_market_data(path)
-
-    assert len(cleaned) == rows - 3
-    assert list(cleaned.columns) == ["timestamp", "open", "high", "low", "close", "volume"]
-    assert cleaned["close"].iloc[0] == 209.0
-    assert np.isfinite(cleaned[["open", "high", "low", "close", "volume"]].to_numpy()).all()
-    assert (cleaned[["open", "high", "low", "close"]] > 0).all().all()
-    assert (cleaned["volume"] >= 0).all()
+    with pytest.raises(ValueError, match=message):
+        load_market_data(path, regular_session_only=False)
 
 
 def test_load_market_data_rejects_too_few_valid_rows(tmp_path) -> None:
-    frame = pd.DataFrame(
-        {
-            "open": [100.0] * 99,
-            "high": [101.0] * 99,
-            "low": [99.0] * 99,
-            "close": [100.0] * 99,
-            "volume": [1000.0] * 99,
-        }
-    )
+    frame = _valid_daily_frame(99)
     path = tmp_path / "too_short.csv"
     frame.to_csv(path, index=False)
 
     with pytest.raises(ValueError, match="at least 100 valid rows"):
-        load_market_data(path)
+        load_market_data(path, regular_session_only=False)
+
+
+def test_load_market_data_requires_timestamps_for_chronological_use(tmp_path) -> None:
+    frame = _valid_daily_frame().drop(columns="Date")
+    path = tmp_path / "untimestamped.csv"
+    frame.to_csv(path, index=False)
+
+    with pytest.raises(ValueError, match="timestamp.*required"):
+        load_market_data(path, regular_session_only=False)

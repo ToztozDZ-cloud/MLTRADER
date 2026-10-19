@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import torch
 
@@ -11,6 +13,8 @@ from agents.serialization import AgentSerializer
 from evolution.evolution import EvolutionEngine
 from evolution.population import Population
 from .evaluator import AgentEvaluator, EvaluationResult
+from .episodes import TrainingEpisodeSampler
+from environment.observation import ObservationBuilder
 
 
 class Trainer:
@@ -23,11 +27,40 @@ class Trainer:
         checkpoint_dir: str | Path = "models/archives",
         champion_dir: str | Path = "models/champions",
         champion_filename: str = "best_agent.json",
+        episodes_per_agent: int = 1,
+        episode_bars: int = 0,
+        randomize_start: bool = False,
+        randomize_instrument: bool = False,
+        randomize_market_regime: bool = False,
+        seed: int = 0,
+        resume_champion: bool = True,
+        model_metadata: dict | None = None,
+        checkpoint_every: int = 1,
+        keep_champions: bool = True,
+        keep_archives: bool = True,
     ) -> None:
         self.population = population
         self.evolution = evolution
         self.evaluator = evaluator
         self.generations = int(generations)
+        self.episodes_per_agent = int(episodes_per_agent)
+        self.seed = int(seed)
+        self.resume_champion = bool(resume_champion)
+        self.model_metadata = dict(model_metadata or {})
+        self.checkpoint_every = int(checkpoint_every)
+        self.keep_champions = bool(keep_champions)
+        self.keep_archives = bool(keep_archives)
+        if self.checkpoint_every < 1:
+            raise ValueError("checkpoint_every must be at least one")
+        if self.episodes_per_agent < 1:
+            raise ValueError("episodes_per_agent must be at least one")
+        self.episode_sampler = TrainingEpisodeSampler(
+            lookback=self.evaluator.lookback,
+            episode_bars=episode_bars,
+            randomize_start=randomize_start,
+            randomize_instrument=randomize_instrument,
+            randomize_market_regime=randomize_market_regime,
+        )
 
         self.checkpoint_dir = Path(checkpoint_dir)
         self.champion_dir = Path(champion_dir)
@@ -102,7 +135,8 @@ class Trainer:
                 "generations must be greater than zero."
             )
 
-        self._load_previous_champion()
+        if self.resume_champion:
+            self._load_previous_champion()
 
         start_time = time.perf_counter()
 
@@ -131,9 +165,13 @@ class Trainer:
                     self.population.agents,
                     results,
                 ),
-                key=lambda item: item[1].fitness,
+                key=lambda item: item[1].fitness if np.isfinite(item[1].fitness) else float("-inf"),
                 reverse=True,
             )
+            if not ranked or not np.isfinite(ranked[0][1].fitness):
+                raise RuntimeError(
+                    f"Generation {generation} produced no finite training fitness values"
+                )
 
             self.population.agents = [
                 agent
@@ -149,14 +187,7 @@ class Trainer:
 
             generation_best_result = ranked[0][1]
 
-            if (
-                best_agent is None
-                or generation_best.fitness
-                > best_agent.fitness
-            ):
-                best_agent = (
-                    generation_best.clone()
-                )
+            best_agent = generation_best.clone()
 
             print(
                 f"Best fitness: "
@@ -183,14 +214,13 @@ class Trainer:
                 f"{generation_best_result.turnover:.4f}"
             )
 
-            self._save_champion(
-                generation_best
-            )
-
-            self._save_generation_checkpoint(
-                generation_best,
-                generation,
-            )
+            if self.keep_champions:
+                self._save_champion(generation_best)
+            if self.keep_archives and (
+                (generation + 1) % self.checkpoint_every == 0
+                or generation == self.generations - 1
+            ):
+                self._save_generation_checkpoint(generation_best, generation)
 
             generation_elapsed = (
                 time.perf_counter()
@@ -236,7 +266,7 @@ class Trainer:
             if generation >= self.generations - 1:
                 continue
 
-            champion = self.evolution.evolve()
+            self.evolution.evolve()
 
         if best_agent is None:
             raise RuntimeError(
@@ -283,7 +313,9 @@ class Trainer:
 
         try:
             champion = AgentSerializer.load(
-                self.champion_path
+                self.champion_path,
+                expected_observation=ObservationBuilder.schema(self.evaluator.lookback),
+                expected_timeframe=self.model_metadata.get("timeframe"),
             )
         except Exception as exc:
             raise RuntimeError(
@@ -299,6 +331,16 @@ class Trainer:
             raise RuntimeError(
                 "Champion file did not contain "
                 "a valid Agent."
+            )
+
+        expected_inputs = ObservationBuilder.input_size(self.evaluator.lookback)
+        if (
+            champion.genome.input_size != expected_inputs
+            or champion.genome.output_size != 1
+        ):
+            raise RuntimeError(
+                "Previous champion architecture is incompatible with the configured "
+                f"observation/action schema (expected {expected_inputs} inputs and one output)."
             )
 
         champion.fitness = float("-inf")
@@ -342,10 +384,16 @@ class Trainer:
         agent: Agent,
     ) -> None:
         champion = agent.clone()
+        metadata = {
+            "observation": ObservationBuilder.schema(self.evaluator.lookback),
+            "training_seed": self.seed,
+            "training": self.model_metadata,
+        }
 
         AgentSerializer.save(
             champion,
             self.champion_path,
+            metadata=metadata,
         )
 
         print(
@@ -367,10 +415,16 @@ class Trainer:
         )
 
         checkpoint = agent.clone()
+        metadata = {
+            "observation": ObservationBuilder.schema(self.evaluator.lookback),
+            "training_seed": self.seed,
+            "training": self.model_metadata,
+        }
 
         AgentSerializer.save(
             checkpoint,
             checkpoint_path,
+            metadata=metadata,
         )
 
     def _evaluate_population(
@@ -387,37 +441,104 @@ class Trainer:
         # execution accounting. A faster path with different inputs can select
         # a different champion, so correctness takes priority here.
 
+        episode_rng = np.random.default_rng(
+            np.random.SeedSequence([self.seed, self.population.generation])
+        )
+        episodes = self.episode_sampler.sample(
+            datasets,
+            episodes=self.episodes_per_agent,
+            rng=episode_rng,
+        )
         results = []
         total = len(agents)
         for index, agent in enumerate(agents, start=1):
             per_dataset = [
-                self.evaluator.evaluate(agent, dataset)
-                for dataset in datasets
+                self.evaluator.evaluate(
+                    agent,
+                    episode.data,
+                    start_step=self.evaluator.lookback - 1,
+                )
+                for episode in episodes
             ]
             count = len(per_dataset)
-            curve_length = min(len(item.equity_curve) for item in per_dataset)
+            fitness_values: np.ndarray = np.asarray(
+                [item.fitness for item in per_dataset], dtype=np.float64
+            )
+            if not np.isfinite(fitness_values).all():
+                aggregate_fitness = float("-inf")
+            else:
+                tail_count = max(1, int(np.ceil(count * 0.25)))
+                lower_tail = float(np.mean(np.sort(fitness_values)[:tail_count]))
+                aggregate_fitness = float(0.5 * np.mean(fitness_values) + 0.5 * lower_tail)
+            curve_length = len(per_dataset[0].equity_curve)
             mean_curve = [
-                sum(item.equity_curve[j] for item in per_dataset) / count
+                float(np.mean([item.equity_curve[j] for item in per_dataset]))
                 for j in range(curve_length)
             ]
             aggregate = EvaluationResult(
-                fitness=sum(item.fitness for item in per_dataset) / count,
-                final_equity=sum(item.final_equity for item in per_dataset) / count,
-                total_return=sum(item.total_return for item in per_dataset) / count,
+                fitness=aggregate_fitness,
+                final_equity=float(np.mean([item.final_equity for item in per_dataset])),
+                total_return=float(np.mean([item.total_return for item in per_dataset])),
                 max_drawdown=max(item.max_drawdown for item in per_dataset),
-                turnover=sum(item.turnover for item in per_dataset) / count,
+                turnover=float(np.mean([item.turnover for item in per_dataset])),
                 equity_curve=mean_curve,
+                trade_count=sum(item.trade_count for item in per_dataset),
+                transaction_costs=float(np.mean([item.transaction_costs for item in per_dataset])),
+                average_gross_exposure=float(np.mean([item.average_gross_exposure for item in per_dataset])),
+                max_gross_exposure=max(item.max_gross_exposure for item in per_dataset),
             )
             agent.fitness = aggregate.fitness
             results.append(aggregate)
+            self._log_episode_results(index, episodes, per_dataset, aggregate)
             print(
                 f"\rEvaluating agents: {index}/{total} "
-                f"({len(datasets)} instruments)",
+                f"({len(episodes)} episodes; fitness={aggregate.fitness:.5f})",
                 end="",
                 flush=True,
             )
         print()
         return results
+
+    def _log_episode_results(self, agent_index, episodes, results, aggregate) -> None:
+        def json_number(value):
+            return float(value) if np.isfinite(value) else None
+
+        record = {
+            "generation": self.population.generation,
+            "agent_index": agent_index - 1,
+            "seed": self.seed,
+            "episode_count": len(episodes),
+            "episodes": [
+                {
+                    "seed": episode.seed,
+                    "instrument": episode.instrument,
+                    "start": episode.start_timestamp,
+                    "end": episode.end_timestamp,
+                    "start_index": episode.start_index,
+                    "end_index": episode.end_index,
+                    "regime": episode.regime,
+                    "fitness": json_number(result.fitness),
+                    "total_return": json_number(result.total_return),
+                    "max_drawdown": json_number(result.max_drawdown),
+                    "turnover": json_number(result.turnover),
+                }
+                for episode, result in zip(episodes, results)
+            ],
+            "aggregate": {
+                "fitness": json_number(aggregate.fitness),
+                "mean_fitness": json_number(np.mean([result.fitness for result in results])),
+                "lower_tail_fitness": float(
+                    np.mean(
+                        [value for value in sorted(result.fitness for result in results)[:max(1, int(np.ceil(len(results) * 0.25)))] if np.isfinite(value)]
+                    )
+                ) if any(np.isfinite(result.fitness) for result in results) else None,
+                "total_return": json_number(aggregate.total_return),
+                "max_drawdown": json_number(aggregate.max_drawdown),
+            },
+        }
+        path = self.checkpoint_dir / "training_episodes.jsonl"
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record, allow_nan=False) + "\n")
 
     @staticmethod
     def _format_duration(

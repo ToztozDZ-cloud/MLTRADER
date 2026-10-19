@@ -43,7 +43,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 EVOLVE_SCRIPT = PROJECT_ROOT / "evolve.py"
 
-DEFAULT_DATA = PROJECT_ROOT / "data" / "raw" / "SPY.csv"
+DEFAULT_DATA = PROJECT_ROOT / "data" / "raw" / "SPY_5m.csv"
 DEFAULT_TRAINING_CONFIG = PROJECT_ROOT / "config" / "training.yaml"
 DEFAULT_MARKET_CONFIG = PROJECT_ROOT / "config" / "market.yaml"
 
@@ -338,7 +338,7 @@ class TrainingRunner:
             int | None
         ) = None
 
-        self.metrics = {
+        self.metrics: dict[str, float | None] = {
             "best_fitness": None,
             "final_equity": None,
             "return_percent": None,

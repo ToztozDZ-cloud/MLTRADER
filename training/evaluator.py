@@ -3,13 +3,14 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable, Sequence, TypedDict
 
 import numpy as np
 import pandas as pd
 import torch
 
 from agents.agent import Agent
+from agents.genome import ConnectionGene, NodeGene
 from environment.costs import TradingCosts
 from environment.exchange import Exchange
 from environment.execution import ExecutionEngine
@@ -18,6 +19,7 @@ from environment.observation import ObservationBuilder
 from environment.portfolio import Portfolio
 
 from .fitness import FitnessCalculator
+from .fitness import periods_per_year_for_timeframe
 
 
 @dataclass
@@ -28,11 +30,29 @@ class EvaluationResult:
     max_drawdown: float
     turnover: float
     equity_curve: list[float]
+    trade_count: int = 0
+    transaction_costs: float = 0.0
+    average_gross_exposure: float = 0.0
+    max_gross_exposure: float = 0.0
 
 
 @dataclass
 class PopulationEvaluationResult:
     results: list[EvaluationResult]
+
+
+class CompiledLayer(TypedDict):
+    nodes: np.ndarray
+    matrix: np.ndarray
+    activations: np.ndarray
+
+
+class CompiledAgent(TypedDict):
+    node_count: int
+    input_indices: list[int]
+    bias_indices: list[int]
+    output_indices: list[int]
+    layers: list[CompiledLayer]
 
 
 class AgentEvaluator:
@@ -45,6 +65,7 @@ class AgentEvaluator:
         max_position_fraction: float = 1.0,
         max_leverage: float = 1.0,
         execute_on_next_bar: bool = True,
+        execution_delay_bars: int = 0,
         fitness_calculator: FitnessCalculator | None = None,
         device: str | torch.device | None = None,
         timeframe: str = "1d",
@@ -53,6 +74,10 @@ class AgentEvaluator:
     ) -> None:
         self.lookback = int(lookback)
         self.initial_cash = float(initial_cash)
+        if self.lookback <= 0:
+            raise ValueError("lookback must be positive")
+        if not np.isfinite(self.initial_cash) or self.initial_cash <= 0.0:
+            raise ValueError("initial_cash must be finite and positive")
 
         self.costs = costs or TradingCosts()
 
@@ -63,22 +88,41 @@ class AgentEvaluator:
         self.max_position_fraction = float(
             max_position_fraction
         )
+        if (
+            not np.isfinite(self.max_position_fraction)
+            or not 0.0 < self.max_position_fraction <= 1.0
+        ):
+            raise ValueError("max_position_fraction must be finite and in (0, 1]")
 
         self.max_leverage = float(
             max_leverage
         )
+        if not np.isfinite(self.max_leverage) or self.max_leverage < 0.0:
+            raise ValueError("max_leverage must be finite and non-negative")
 
         self.execute_on_next_bar = bool(
             execute_on_next_bar
         )
+        if not self.execute_on_next_bar:
+            raise ValueError(
+                "Only completed-bar signal with next-bar-open execution is supported; "
+                "execute_on_next_bar=False is invalid."
+            )
+        self.execution_delay_bars = int(execution_delay_bars)
+        if self.execution_delay_bars < 0:
+            raise ValueError("execution_delay_bars must be non-negative")
         self.timeframe = str(timeframe).lower()
         self.exchange_timezone = str(exchange_timezone)
         self.flatten_before_close_minutes = max(0, int(flatten_before_close_minutes))
-        self.timeframe_minutes = int(self.timeframe[:-1]) if self.timeframe.endswith("m") else None
+        self.timeframe_minutes = None
+        if self.timeframe.endswith(("m", "h")) and self.timeframe[:-1].isdigit():
+            interval = int(self.timeframe[:-1])
+            self.timeframe_minutes = interval * (60 if self.timeframe.endswith("h") else 1)
+        self.periods_per_year = periods_per_year_for_timeframe(self.timeframe)
 
         self.fitness_calculator = (
             fitness_calculator
-            or FitnessCalculator()
+            or FitnessCalculator(periods_per_year=self.periods_per_year)
         )
 
         if device is None:
@@ -160,6 +204,11 @@ class AgentEvaluator:
         ]
 
         turnover = 0.0
+        trade_count = 0
+        transaction_costs = 0.0
+        gross_exposures = []
+        invalid_output_seen = False
+        pending_targets: dict[int, float] = {}
         total_steps = len(market) - start_step - 1
         completed_steps = 0
         progress_interval = max(1, total_steps // 100)
@@ -170,17 +219,17 @@ class AgentEvaluator:
                 portfolio,
             )
 
-            action = agent.act(
-                observation
-            )
-
-            target_fraction = float(
-                np.clip(
-                    action,
-                    -1.0,
-                    1.0,
-                )
-            )
+            try:
+                action_values = np.asarray(agent.act(observation), dtype=np.float64).reshape(-1)
+                if action_values.size != 1 or not np.isfinite(action_values[0]):
+                    raise ValueError("agent output must be one finite target-position value")
+                target_fraction = float(np.clip(action_values[0], -1.0, 1.0))
+            except Exception:
+                target_fraction = 0.0
+                invalid_agent_output = True
+                invalid_output_seen = True
+            else:
+                invalid_agent_output = False
 
             if not self.allow_short:
                 target_fraction = max(
@@ -209,9 +258,9 @@ class AgentEvaluator:
 
             current_price = market.current_price
 
-            current_equity = portfolio.equity(
-                current_price
-            )
+            current_equity = portfolio.equity(current_price)
+            if not np.isfinite(current_equity) or current_equity <= 0.0:
+                break
 
             target_value = (
                 current_equity
@@ -229,36 +278,34 @@ class AgentEvaluator:
             if next_bar is None:
                 break
 
-            # A signal formed after bar t closes can only fill at the next
-            # bar's open. Using its close would leak within-bar information.
-            execution_price = (
-                float(next_bar["open"])
-                if self.execute_on_next_bar and "open" in next_bar.index
-                else market.current_price
-            )
-
-            if self.execute_on_next_bar:
-                result = (
-                    execution.execute_target_position(
-                        target_position=target_position,
-                        market_price=execution_price,
-                    )
+            if not invalid_agent_output:
+                pending_targets[
+                    market.current_step + self.execution_delay_bars
+                ] = target_position
+            due_target = pending_targets.pop(market.current_step, None)
+            if due_target is not None:
+                execution_price = float(next_bar["open"])
+                order_result = execution.execute_target_position(
+                    target_position=due_target,
+                    market_price=execution_price,
                 )
-
-                turnover += (
-                    abs(result.notional)
-                    / max(
-                        portfolio.equity(
-                            execution_price
-                        ),
-                        1.0,
+                if order_result.executed_quantity != 0.0:
+                    trade_count += 1
+                    transaction_costs += self.costs.estimated_execution_cost(order_result.notional)
+                    turnover += abs(order_result.notional) / max(
+                        portfolio.equity(execution_price), 1.0
                     )
-                )
 
             equity_curve.append(
                 portfolio.equity(
                     market.current_price
                 )
+            )
+            marked_equity = equity_curve[-1]
+            gross_exposures.append(
+                abs(portfolio.position * market.current_price) / max(marked_equity, 1.0)
+                if np.isfinite(marked_equity) and marked_equity > 0.0
+                else float("inf")
             )
 
             completed_steps += 1
@@ -278,6 +325,10 @@ class AgentEvaluator:
                 )
             )
 
+            if liquidation.executed_quantity != 0.0:
+                trade_count += 1
+                transaction_costs += self.costs.estimated_execution_cost(liquidation.notional)
+
             turnover += (
                 abs(liquidation.notional)
                 / max(
@@ -294,14 +345,19 @@ class AgentEvaluator:
                 )
             )
 
-        result = self._calculate_result(
+        evaluation_result = self._calculate_result(
             equity_curve=equity_curve,
             turnover=turnover,
+            trade_count=trade_count,
+            transaction_costs=transaction_costs,
+            gross_exposures=gross_exposures,
         )
+        if invalid_output_seen:
+            evaluation_result.fitness = float("-inf")
 
-        agent.fitness = result.fitness
+        agent.fitness = evaluation_result.fitness
 
-        return result
+        return evaluation_result
 
     # ==========================================================
     # GPU POPULATION EVALUATION
@@ -784,7 +840,7 @@ class AgentEvaluator:
         the same topological depth.
         """
 
-        compiled_agents = []
+        compiled_agents: list[CompiledAgent] = []
 
         max_nodes = 0
         max_inputs = 0
@@ -857,7 +913,7 @@ class AgentEvaluator:
                 len(output_indices),
             )
 
-            incoming = {
+            incoming: dict[int, list[ConnectionGene]] = {
                 node_id: []
                 for node_id in order
             }
@@ -881,7 +937,7 @@ class AgentEvaluator:
                     connection
                 )
 
-            depths = {}
+            depths: dict[int, int] = {}
 
             for node_id in order:
                 node = node_by_id[node_id]
@@ -910,7 +966,7 @@ class AgentEvaluator:
 
                 depths[node_id] = node_depth
 
-            depth_groups = {}
+            depth_groups: dict[int, list[NodeGene]] = {}
 
             for node_id in order:
                 node = node_by_id[node_id]
@@ -935,7 +991,7 @@ class AgentEvaluator:
                 len(depth_groups),
             )
 
-            layers = []
+            layers: list[CompiledLayer] = []
 
             for depth in sorted(
                 depth_groups
@@ -951,7 +1007,7 @@ class AgentEvaluator:
                     for node in target_nodes
                 ]
 
-                matrix = np.zeros(
+                matrix: np.ndarray = np.zeros(
                     (
                         len(target_nodes),
                         len(node_ids),
@@ -959,7 +1015,7 @@ class AgentEvaluator:
                     dtype=np.float32,
                 )
 
-                activations = np.zeros(
+                activations: np.ndarray = np.zeros(
                     len(target_nodes),
                     dtype=np.int64,
                 )
@@ -1038,10 +1094,10 @@ class AgentEvaluator:
             compiled_agents
         )
 
-        layer_matrices = []
-        layer_nodes = []
-        layer_activations = []
-        layer_masks = []
+        layer_matrices: list[torch.Tensor] = []
+        layer_nodes: list[torch.Tensor] = []
+        layer_activations: list[torch.Tensor] = []
+        layer_masks: list[torch.Tensor] = []
 
         for depth_index in range(
             max_depth
@@ -1049,17 +1105,17 @@ class AgentEvaluator:
             target_count = 0
 
             for description in compiled_agents:
-                layers = description[
+                agent_layers = description[
                     "layers"
                 ]
 
-                if depth_index >= len(layers):
+                if depth_index >= len(agent_layers):
                     continue
 
                 target_count = max(
                     target_count,
                     len(
-                        layers[
+                        agent_layers[
                             depth_index
                         ][
                             "nodes"
@@ -1107,14 +1163,14 @@ class AgentEvaluator:
             for agent_index, description in enumerate(
                 compiled_agents
             ):
-                layers = description[
+                agent_layers = description[
                     "layers"
                 ]
 
-                if depth_index >= len(layers):
+                if depth_index >= len(agent_layers):
                     continue
 
-                layer = layers[
+                layer = agent_layers[
                     depth_index
                 ]
 
@@ -1313,12 +1369,12 @@ class AgentEvaluator:
             for node in genome.nodes
         }
 
-        adjacency = {
+        adjacency: dict[int, list[int]] = {
             node_id: []
             for node_id in nodes
         }
 
-        indegree = {
+        indegree: dict[int, int] = {
             node_id: 0
             for node_id in nodes
         }
@@ -2374,8 +2430,11 @@ class AgentEvaluator:
         self,
         equity_curve: list[float],
         turnover: float,
+        trade_count: int = 0,
+        transaction_costs: float = 0.0,
+        gross_exposures: list[float] | None = None,
     ) -> EvaluationResult:
-        equity = np.asarray(
+        equity: np.ndarray = np.asarray(
             equity_curve,
             dtype=np.float64,
         )
@@ -2395,6 +2454,10 @@ class AgentEvaluator:
                     float(value)
                     for value in equity
                 ],
+                trade_count=trade_count,
+                transaction_costs=transaction_costs,
+                average_gross_exposure=0.0,
+                max_gross_exposure=0.0,
             )
 
         initial = equity[0]
@@ -2414,6 +2477,10 @@ class AgentEvaluator:
                     float(value)
                     for value in equity
                 ],
+                trade_count=trade_count,
+                transaction_costs=transaction_costs,
+                average_gross_exposure=0.0,
+                max_gross_exposure=0.0,
             )
 
         total_return = (
@@ -2440,42 +2507,9 @@ class AgentEvaluator:
             )
         )
 
-        returns = (
-            np.diff(equity)
-            / equity[:-1]
-        )
-
-        volatility = float(
-            np.std(
-                returns
-            )
-        )
-
-        if volatility > 0.0:
-            sharpe = (
-                float(
-                    np.mean(
-                        returns
-                    )
-                    / volatility
-                )
-                * np.sqrt(252.0)
-            )
-        else:
-            sharpe = 0.0
-
-        fitness = (
-            self.fitness_calculator.return_weight
-            * total_return
-            + self.fitness_calculator.sharpe_weight
-            * sharpe
-            - self.fitness_calculator.drawdown_penalty
-            * max_drawdown
-            - self.fitness_calculator.volatility_penalty
-            * volatility
-            - self.fitness_calculator.turnover_penalty
-            * turnover
-        )
+        fitness = self.fitness_calculator.calculate(equity_curve, turnover)
+        exposures: np.ndarray = np.asarray(gross_exposures or [], dtype=np.float64)
+        finite_exposures = exposures[np.isfinite(exposures)]
 
         return EvaluationResult(
             fitness=float(
@@ -2497,4 +2531,12 @@ class AgentEvaluator:
                 float(value)
                 for value in equity
             ],
+            trade_count=int(trade_count),
+            transaction_costs=float(transaction_costs),
+            average_gross_exposure=(
+                float(np.mean(finite_exposures)) if finite_exposures.size else 0.0
+            ),
+            max_gross_exposure=(
+                float(np.max(finite_exposures)) if finite_exposures.size else 0.0
+            ),
         )
