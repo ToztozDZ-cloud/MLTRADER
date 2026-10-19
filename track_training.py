@@ -135,6 +135,20 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "xpu"),
+        default="auto",
+        help="Evaluation device; xpu selects Intel Arc GPUs.",
+    )
+
+    parser.add_argument(
+        "--resume-from",
+        type=Path,
+        default=None,
+        help="Warm-start this run from a saved champion without overwriting it.",
+    )
+
+    parser.add_argument(
         "--reset-champion",
         action="store_true",
         help="Delete the persistent champion before training.",
@@ -194,6 +208,7 @@ def clean_champion() -> None:
 
 def build_evolve_command(
     args: argparse.Namespace,
+    run_dir: Path,
 ) -> list[str]:
     command = [
         sys.executable,
@@ -213,6 +228,10 @@ def build_evolve_command(
                 str(args.generations),
             ]
         )
+
+    command.extend(["--device", args.device])
+    command.extend(["--checkpoint-dir", str(run_dir / "checkpoints")])
+    command.extend(["--champion-dir", str(run_dir / "champions")])
 
     if args.reset_champion:
         command.append(
@@ -1126,13 +1145,6 @@ def main() -> int:
         return 1
 
     # ------------------------------------------------------------------------
-    # Reset champion
-    # ------------------------------------------------------------------------
-
-    if args.reset_champion:
-        clean_champion()
-
-    # ------------------------------------------------------------------------
     # Create run directory
     # ------------------------------------------------------------------------
 
@@ -1190,10 +1202,19 @@ def main() -> int:
         f"  {history_csv}"
     )
 
-    print(
-        f"Persistent champion:\n"
-        f"  {CHAMPION_PATH}"
-    )
+    run_champion = run_dir / "champions" / "best_agent.json"
+    print(f"Run champion:\n  {run_champion}")
+
+    if args.resume_from is not None:
+        resume_path = resolve_path(args.resume_from)
+        if not resume_path.is_file():
+            print(f"ERROR: resume champion not found: {resume_path}", file=sys.stderr)
+            return 1
+        if args.reset_champion:
+            print("ERROR: --reset-champion cannot be combined with --resume-from", file=sys.stderr)
+            return 1
+        run_champion.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(resume_path, run_champion)
 
     print("=" * 72)
     print()
@@ -1202,9 +1223,7 @@ def main() -> int:
     # Build command
     # ------------------------------------------------------------------------
 
-    command = (
-        build_evolve_command(args)
-    )
+    command = build_evolve_command(args, run_dir)
 
     print(
         "Starting training process..."

@@ -127,16 +127,55 @@ class AgentEvaluator:
 
         if device is None:
             self.device = torch.device(
-                "cuda"
-                if torch.cuda.is_available()
-                else "cpu"
+                "cuda" if torch.cuda.is_available() else "cpu"
             )
+        elif str(device) == "auto":
+            if self._xpu_available():
+                self.device = torch.device("xpu")
+            elif torch.cuda.is_available():
+                self.device = torch.device("cuda")
+            else:
+                self.device = torch.device("cpu")
         else:
             self.device = torch.device(device)
+
+        if self.device.type == "xpu" and not self._xpu_available():
+            raise RuntimeError(
+                "Intel GPU was requested, but PyTorch XPU is unavailable. "
+                "Install the official PyTorch XPU build and verify the Intel GPU driver."
+            )
+        if self.device.type == "cuda" and not torch.cuda.is_available():
+            raise RuntimeError("CUDA was requested, but no CUDA device is available.")
+        if self.device.type not in {"cpu", "cuda", "xpu"}:
+            raise ValueError(f"Unsupported evaluation device: {self.device.type}")
+
+    @staticmethod
+    def _xpu_available() -> bool:
+        xpu = getattr(torch, "xpu", None)
+        if xpu is None:
+            return False
+        try:
+            return bool(xpu.is_available())
+        except (OSError, RuntimeError):
+            return False
 
     @property
     def using_cuda(self) -> bool:
         return self.device.type == "cuda"
+
+    @property
+    def using_xpu(self) -> bool:
+        return self.device.type == "xpu"
+
+    @property
+    def using_accelerator(self) -> bool:
+        return self.device.type in {"cuda", "xpu"}
+
+    def _synchronize_device(self) -> None:
+        if self.using_cuda:
+            torch.cuda.synchronize(self.device)
+        elif self.using_xpu:
+            torch.xpu.synchronize(self.device)
 
     # ==========================================================
     # CPU REFERENCE EVALUATION
@@ -374,6 +413,11 @@ class AgentEvaluator:
                 results=[]
             )
 
+        market_data = MarketEnvironment(
+            data=market_data,
+            initial_cash=self.initial_cash,
+        ).data
+
         if start_step is None:
             start_step = self.lookback - 1
 
@@ -396,7 +440,7 @@ class AgentEvaluator:
 
         print()
         print(
-            f"GPU population evaluation | "
+            f"{self.device.type.upper()} population evaluation | "
             f"{len(agents)} agents | "
             f"{len(market_data)} market bars"
         )
@@ -419,9 +463,9 @@ class AgentEvaluator:
             f"{preprocessing_elapsed:.2f}s"
         )
 
-        prices = self._extract_prices(
-            market_data
-        )
+        prices = self._extract_prices(market_data)
+        opens = market_data["open"].to_numpy(dtype=np.float32)
+        force_flatten = self._precompute_flatten_mask(market_data)
 
         observation_tensor = torch.from_numpy(
             observations
@@ -437,10 +481,13 @@ class AgentEvaluator:
             dtype=torch.float32,
         )
 
-        if self.using_cuda:
-            torch.cuda.synchronize(
-                self.device
-            )
+        open_tensor = torch.from_numpy(opens).to(
+            self.device,
+            dtype=torch.float32,
+        )
+        flatten_tensor = torch.from_numpy(force_flatten).to(self.device)
+
+        self._synchronize_device()
 
         compiled = self._compile_population(
             agents
@@ -450,6 +497,8 @@ class AgentEvaluator:
             agents=agents,
             observations=observation_tensor,
             prices=price_tensor,
+            opens=open_tensor,
+            force_flatten=flatten_tensor,
             compiled=compiled,
             start_step=start_step,
         )
@@ -562,48 +611,7 @@ class AgentEvaluator:
                 -self.lookback :
             ]
 
-            close = window[:, 3]
-
-            safe_close = np.where(
-                close > 0.0,
-                close,
-                1.0,
-            )
-
-            normalized = window.copy()
-
-            normalized[:, :4] = (
-                normalized[:, :4]
-                / safe_close[:, None]
-                - 1.0
-            )
-
-            volume_scale = max(
-                float(
-                    np.mean(window[:, 4])
-                ),
-                1.0,
-            )
-
-            normalized[:, 4] = (
-                window[:, 4]
-                / volume_scale
-                - 1.0
-            )
-
-            normalized = np.clip(
-                normalized,
-                -10.0,
-                10.0,
-            )
-
-            progress = (
-                step
-                / max(
-                    total_rows - 1,
-                    1,
-                )
-            )
+            normalized = ObservationBuilder._normalize_market_data(window)
 
             observation = np.concatenate(
                 [
@@ -611,9 +619,9 @@ class AgentEvaluator:
                     np.array(
                         [
                             0.0,
-                            1.0,
                             0.0,
-                            progress,
+                            0.0,
+                            0.0,
                         ],
                         dtype=np.float32,
                     ),
@@ -667,6 +675,27 @@ class AgentEvaluator:
             observations,
             dtype=np.float32,
         )
+
+    def _precompute_flatten_mask(
+        self,
+        market_data: pd.DataFrame,
+    ) -> np.ndarray:
+        mask = np.zeros(len(market_data), dtype=np.bool_)
+        if (
+            self.timeframe_minutes is None
+            or self.flatten_before_close_minutes <= 0
+            or "timestamp" not in market_data.columns
+        ):
+            return mask
+
+        cutoff = 16 * 60 - self.flatten_before_close_minutes - self.timeframe_minutes
+        for index, value in enumerate(market_data["timestamp"]):
+            stamp = pd.Timestamp(value)
+            if stamp.tzinfo is None:
+                stamp = stamp.tz_localize("UTC")
+            local_stamp = stamp.tz_convert(self.exchange_timezone)
+            mask[index] = local_stamp.hour * 60 + local_stamp.minute >= cutoff
+        return mask
 
     @staticmethod
     def _extract_prices(
@@ -1123,7 +1152,7 @@ class AgentEvaluator:
                     ),
                 )
 
-            matrices = torch.zeros(
+            layer_matrix_batch = torch.zeros(
                 (
                     population_size,
                     target_count,
@@ -1133,7 +1162,7 @@ class AgentEvaluator:
                 device=self.device,
             )
 
-            nodes = torch.zeros(
+            layer_node_batch = torch.zeros(
                 (
                     population_size,
                     target_count,
@@ -1142,7 +1171,7 @@ class AgentEvaluator:
                 device=self.device,
             )
 
-            activations = torch.zeros(
+            layer_activation_batch = torch.zeros(
                 (
                     population_size,
                     target_count,
@@ -1151,7 +1180,7 @@ class AgentEvaluator:
                 device=self.device,
             )
 
-            masks = torch.zeros(
+            layer_mask_batch = torch.zeros(
                 (
                     population_size,
                     target_count,
@@ -1201,7 +1230,7 @@ class AgentEvaluator:
                         f"{local_width} > {max_nodes}"
                     )
 
-                matrices[
+                layer_matrix_batch[
                     agent_index,
                     :local_target_count,
                     :local_width,
@@ -1211,7 +1240,7 @@ class AgentEvaluator:
                     self.device
                 )
 
-                nodes[
+                layer_node_batch[
                     agent_index,
                     :local_target_count,
                 ] = torch.from_numpy(
@@ -1220,7 +1249,7 @@ class AgentEvaluator:
                     self.device
                 )
 
-                activations[
+                layer_activation_batch[
                     agent_index,
                     :local_target_count,
                 ] = torch.from_numpy(
@@ -1229,25 +1258,25 @@ class AgentEvaluator:
                     self.device
                 )
 
-                masks[
+                layer_mask_batch[
                     agent_index,
                     :local_target_count,
                 ] = True
 
             layer_matrices.append(
-                matrices
+                layer_matrix_batch
             )
 
             layer_nodes.append(
-                nodes
+                layer_node_batch
             )
 
             layer_activations.append(
-                activations
+                layer_activation_batch
             )
 
             layer_masks.append(
-                masks
+                layer_mask_batch
             )
 
         input_tensor = torch.full(
@@ -1446,6 +1475,8 @@ class AgentEvaluator:
         agents: Sequence[Agent],
         observations: torch.Tensor,
         prices: torch.Tensor,
+        opens: torch.Tensor,
+        force_flatten: torch.Tensor,
         compiled: dict,
         start_step: int,
     ) -> list[EvaluationResult]:
@@ -1480,36 +1511,46 @@ class AgentEvaluator:
             device=self.device,
         )
 
-        initial_equity = cash.clone()
+        trade_count = torch.zeros(
+            population_size,
+            dtype=torch.long,
+            device=self.device,
+        )
 
-        peak_equity = initial_equity.clone()
-
-        max_drawdown = torch.zeros(
+        transaction_costs = torch.zeros(
             population_size,
             dtype=torch.float32,
             device=self.device,
         )
 
+        invalid_output_seen = torch.zeros(
+            population_size,
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+        initial_equity = cash.clone()
+
         equity_history = [
             initial_equity.clone()
         ]
+
+        gross_exposure_history = []
+        pending_targets: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
         steps = observations.shape[0]
 
         progress_interval = max(
             1,
-            steps // 100,
+            steps // 10,
         )
 
         simulation_start = time.perf_counter()
 
-        if self.using_cuda:
-            torch.cuda.synchronize(
-                self.device
-            )
+        self._synchronize_device()
 
         print(
-            f"GPU evaluation | "
+            f"{self.device.type.upper()} evaluation | "
             f"{population_size} agents | "
             f"{steps:,} bars"
         )
@@ -1532,9 +1573,10 @@ class AgentEvaluator:
                 * current_price
             )
 
-            safe_equity = torch.clamp(
+            safe_equity = torch.where(
+                equity > 0.0,
                 equity,
-                min=1e-6,
+                torch.ones_like(equity),
             )
 
             position_fraction = (
@@ -1557,14 +1599,6 @@ class AgentEvaluator:
                 / safe_equity
             )
 
-            progress = (
-                float(price_index)
-                / max(
-                    len(prices) - 1,
-                    1,
-                )
-            )
-
             batch_observation = (
                 observations[
                     relative_step
@@ -1577,29 +1611,23 @@ class AgentEvaluator:
                 .clone()
             )
 
-            batch_observation[:, -4] = (
-                position_fraction
+            batch_observation[:, -4] = cash_fraction
+            batch_observation[:, -3] = position_fraction
+            batch_observation[:, -2] = position / torch.maximum(
+                torch.ones_like(position),
+                torch.abs(position),
             )
-
-            batch_observation[:, -3] = (
-                cash_fraction
-            )
-
-            batch_observation[:, -2] = (
-                unrealized_fraction
-            )
-
-            batch_observation[:, -1] = (
-                progress
-            )
+            batch_observation[:, -1] = unrealized_fraction
 
             actions = self._forward_population(
                 batch_observation,
                 compiled,
             )
 
+            invalid_output = torch.isnan(actions)
+            invalid_output_seen |= invalid_output
             target_fraction = torch.clamp(
-                actions,
+                torch.nan_to_num(actions, nan=0.0, posinf=1.0, neginf=-1.0),
                 -1.0,
                 1.0,
             )
@@ -1616,6 +1644,12 @@ class AgentEvaluator:
                 self.max_position_fraction
             )
 
+            target_fraction = torch.where(
+                force_flatten[price_index],
+                torch.zeros_like(target_fraction),
+                target_fraction,
+            )
+
             target_position = (
                 equity
                 * target_fraction
@@ -1625,53 +1659,42 @@ class AgentEvaluator:
                 )
             )
 
-            if (
-                self.execute_on_next_bar
-                and relative_step + 1 < steps
-            ):
-                execution_price = prices[
-                    price_index + 1
-                ]
-
-                average_entry = (
-                    self._execute_batch(
-                        cash=cash,
-                        position=position,
-                        average_entry=average_entry,
-                        turnover=turnover,
-                        target_position=target_position,
-                        execution_price=execution_price,
-                    )
+            next_index = price_index + 1
+            due_index = next_index + self.execution_delay_bars
+            pending_targets[due_index] = (
+                target_position,
+                ~invalid_output,
+            )
+            due_target = pending_targets.pop(next_index, None)
+            if due_target is not None:
+                scheduled_position, scheduled_mask = due_target
+                effective_target = torch.where(
+                    scheduled_mask,
+                    scheduled_position,
+                    position,
+                )
+                average_entry = self._execute_batch(
+                    cash=cash,
+                    position=position,
+                    average_entry=average_entry,
+                    turnover=turnover,
+                    trade_count=trade_count,
+                    transaction_costs=transaction_costs,
+                    target_position=effective_target,
+                    execution_price=opens[next_index],
                 )
 
-                marked_equity = (
-                    cash
-                    + position
-                    * execution_price
-                )
-
-                peak_equity = torch.maximum(
-                    peak_equity,
-                    marked_equity,
-                )
-
-                drawdown = (
-                    marked_equity
-                    / torch.clamp(
-                        peak_equity,
-                        min=1e-6,
-                    )
-                    - 1.0
-                )
-
-                max_drawdown = torch.maximum(
-                    max_drawdown,
-                    -drawdown,
-                )
-
-                equity_history.append(
-                    marked_equity.clone()
-                )
+            marked_price = prices[next_index]
+            marked_equity = cash + position * marked_price
+            equity_history.append(marked_equity.clone())
+            gross_exposure_history.append(
+                torch.where(
+                    torch.isfinite(marked_equity) & (marked_equity > 0.0),
+                    torch.abs(position * marked_price)
+                    / torch.clamp(marked_equity, min=1.0),
+                    torch.full_like(marked_equity, float("inf")),
+                ).clone()
+            )
 
             completed = (
                 relative_step + 1
@@ -1681,10 +1704,7 @@ class AgentEvaluator:
                 completed == steps
                 or completed % progress_interval == 0
             ):
-                if self.using_cuda:
-                    torch.cuda.synchronize(
-                        self.device
-                    )
+                self._synchronize_device()
 
                 elapsed = (
                     time.perf_counter()
@@ -1708,7 +1728,7 @@ class AgentEvaluator:
                 )
 
                 self._print_progress_bar(
-                    prefix="GPU evaluation",
+                    prefix=f"{self.device.type.upper()} evaluation",
                     completed=completed,
                     total=steps,
                     elapsed=elapsed,
@@ -1716,10 +1736,7 @@ class AgentEvaluator:
                     eta=eta,
                 )
 
-        if self.using_cuda:
-            torch.cuda.synchronize(
-                self.device
-            )
+        self._synchronize_device()
 
         final_price = prices[-1]
 
@@ -1729,6 +1746,8 @@ class AgentEvaluator:
                 position=position,
                 average_entry=average_entry,
                 turnover=turnover,
+                trade_count=trade_count,
+                transaction_costs=transaction_costs,
                 target_position=torch.zeros_like(
                     position
                 ),
@@ -1736,10 +1755,7 @@ class AgentEvaluator:
             )
         )
 
-        if self.using_cuda:
-            torch.cuda.synchronize(
-                self.device
-            )
+        self._synchronize_device()
 
         final_equity = (
             cash
@@ -1757,72 +1773,7 @@ class AgentEvaluator:
             dim=0,
         )
 
-        returns = (
-            equity_matrix[1:]
-            / torch.clamp(
-                equity_matrix[:-1],
-                min=1e-6,
-            )
-            - 1.0
-        )
-
-        if returns.shape[0] > 0:
-            volatility = torch.std(
-                returns,
-                dim=0,
-                unbiased=False,
-            )
-
-            mean_return = torch.mean(
-                returns,
-                dim=0,
-            )
-        else:
-            volatility = torch.zeros(
-                population_size,
-                dtype=torch.float32,
-                device=self.device,
-            )
-
-            mean_return = torch.zeros(
-                population_size,
-                dtype=torch.float32,
-                device=self.device,
-            )
-
-        sharpe = torch.where(
-            volatility > 0.0,
-            mean_return
-            / volatility
-            * np.sqrt(252.0),
-            torch.zeros_like(
-                volatility
-            ),
-        )
-
-        total_return = (
-            final_equity
-            / initial_equity
-            - 1.0
-        )
-
-        fitness = (
-            self.fitness_calculator.return_weight
-            * total_return
-            + self.fitness_calculator.sharpe_weight
-            * sharpe
-            - self.fitness_calculator.drawdown_penalty
-            * max_drawdown
-            - self.fitness_calculator.volatility_penalty
-            * volatility
-            - self.fitness_calculator.turnover_penalty
-            * turnover
-        )
-
-        if self.using_cuda:
-            torch.cuda.synchronize(
-                self.device
-            )
+        self._synchronize_device()
 
         total_elapsed = (
             time.perf_counter()
@@ -1830,34 +1781,10 @@ class AgentEvaluator:
         )
 
         print(
-            f"GPU evaluation complete | "
+            f"{self.device.type.upper()} evaluation complete | "
             f"{steps:,} bars | "
             f"{total_elapsed:.2f}s | "
             f"{steps / total_elapsed:.2f} bar/s"
-        )
-
-        fitness_cpu = (
-            fitness.detach()
-            .cpu()
-            .numpy()
-        )
-
-        final_equity_cpu = (
-            final_equity.detach()
-            .cpu()
-            .numpy()
-        )
-
-        total_return_cpu = (
-            total_return.detach()
-            .cpu()
-            .numpy()
-        )
-
-        max_drawdown_cpu = (
-            max_drawdown.detach()
-            .cpu()
-            .numpy()
         )
 
         turnover_cpu = (
@@ -1866,10 +1793,23 @@ class AgentEvaluator:
             .numpy()
         )
 
+        trade_count_cpu = trade_count.detach().cpu().numpy()
+        transaction_costs_cpu = transaction_costs.detach().cpu().numpy()
+        invalid_output_cpu = invalid_output_seen.detach().cpu().numpy()
+
         equity_cpu = (
             equity_matrix.detach()
             .cpu()
             .numpy()
+        )
+
+        exposure_cpu = (
+            torch.stack(gross_exposure_history)
+            .detach()
+            .cpu()
+            .numpy()
+            if gross_exposure_history
+            else np.empty((0, population_size), dtype=np.float32)
         )
 
         results = []
@@ -1877,30 +1817,17 @@ class AgentEvaluator:
         for index, agent in enumerate(
             agents
         ):
-            result = EvaluationResult(
-                fitness=float(
-                    fitness_cpu[index]
-                ),
-                final_equity=float(
-                    final_equity_cpu[index]
-                ),
-                total_return=float(
-                    total_return_cpu[index]
-                ),
-                max_drawdown=float(
-                    max_drawdown_cpu[index]
-                ),
-                turnover=float(
-                    turnover_cpu[index]
-                ),
-                equity_curve=[
-                    float(value)
-                    for value in equity_cpu[
-                        :,
-                        index,
-                    ]
+            result = self._calculate_result(
+                equity_curve=[float(value) for value in equity_cpu[:, index]],
+                turnover=float(turnover_cpu[index]),
+                trade_count=int(trade_count_cpu[index]),
+                transaction_costs=float(transaction_costs_cpu[index]),
+                gross_exposures=[
+                    float(value) for value in exposure_cpu[:, index]
                 ],
             )
+            if invalid_output_cpu[index]:
+                result.fitness = float("-inf")
 
             agent.fitness = result.fitness
 
@@ -2155,11 +2082,7 @@ class AgentEvaluator:
             0,
         ]
 
-        return torch.clamp(
-            actions,
-            -1.0,
-            1.0,
-        )
+        return actions
 
     # ==========================================================
     # GPU PORTFOLIO EXECUTION
@@ -2171,6 +2094,8 @@ class AgentEvaluator:
         position: torch.Tensor,
         average_entry: torch.Tensor,
         turnover: torch.Tensor,
+        trade_count: torch.Tensor,
+        transaction_costs: torch.Tensor,
         target_position: torch.Tensor,
         execution_price: torch.Tensor,
     ) -> torch.Tensor:
@@ -2178,6 +2103,11 @@ class AgentEvaluator:
             target_position
             - position
         )
+
+        unchanged = torch.abs(quantity) <= (
+            1e-12 + 1e-12 * torch.abs(position)
+        )
+        quantity = torch.where(unchanged, torch.zeros_like(quantity), quantity)
 
         if not self.allow_short:
             quantity = torch.maximum(
@@ -2244,7 +2174,7 @@ class AgentEvaluator:
         )
 
         adverse_rate = (
-            self.costs.spread_rate
+            self.costs.spread_rate / 2.0
             + self.costs.slippage_rate
         )
 
@@ -2257,11 +2187,7 @@ class AgentEvaluator:
             )
         )
 
-        cost_rate = (
-            self.costs.commission_rate
-            + self.costs.spread_rate
-            + self.costs.slippage_rate
-        )
+        cost_rate = self.costs.commission_rate
 
         notional = (
             quantity
@@ -2401,7 +2327,7 @@ class AgentEvaluator:
         )
 
         updated_average = torch.where(
-            torch.abs(new_position) < 1e-8,
+            new_position == 0.0,
             torch.zeros_like(
                 updated_average
             ),
@@ -2414,6 +2340,13 @@ class AgentEvaluator:
                 equity_before,
                 min=1.0,
             )
+        )
+
+        trade_count += (quantity != 0.0).to(torch.long)
+        transaction_costs += torch.abs(notional) * (
+            self.costs.commission_rate
+            + self.costs.spread_rate / 2.0
+            + self.costs.slippage_rate
         )
 
         position.copy_(

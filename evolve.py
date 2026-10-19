@@ -374,6 +374,12 @@ def main() -> None:
             "the training configuration."
         ),
     )
+    parser.add_argument(
+        "--device",
+        choices=("auto", "cpu", "cuda", "xpu"),
+        default="auto",
+        help="Evaluation device; xpu selects Intel Arc GPUs.",
+    )
     parser.add_argument("--seed", type=int, default=None, help="Override the configured reproducibility seed.")
     parser.add_argument("--checkpoint-dir", type=Path, default=CHECKPOINT_DIR)
     parser.add_argument("--champion-dir", type=Path, default=CHAMPION_DIR)
@@ -418,6 +424,8 @@ def main() -> None:
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
+    if AgentEvaluator._xpu_available():
+        torch.xpu.manual_seed_all(seed)
 
     training_section = training_config[
         "training"
@@ -543,6 +551,7 @@ def main() -> None:
             )
         ),
         fitness_calculator=fitness_calculator,
+        device=args.device,
     )
 
     if args.generations is not None:
@@ -642,16 +651,11 @@ def main() -> None:
         "Max leverage:       "
         f"{trading_config.get('max_leverage', 1.0)}"
     )
-    print(
-        "CUDA available:     "
-        f"{torch.cuda.is_available()}"
-    )
-
-    if torch.cuda.is_available():
-        print(
-            "GPU:                "
-            f"{torch.cuda.get_device_name(0)}"
-        )
+    print(f"Evaluation device:  {evaluator.device}")
+    if evaluator.using_xpu:
+        print(f"GPU:                {torch.xpu.get_device_name(evaluator.device)}")
+    elif evaluator.using_cuda:
+        print(f"GPU:                {torch.cuda.get_device_name(evaluator.device)}")
 
     print(
         "Persistent champion: "

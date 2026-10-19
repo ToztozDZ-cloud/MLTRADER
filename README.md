@@ -42,6 +42,18 @@ The downloader validates each symbol through the shared OHLCV pipeline, keeps re
 
 ## Training
 
+### Intel Arc GPU training
+
+On Windows 11, install the official PyTorch XPU build after the project requirements and ensure the current Intel graphics driver is installed. PyTorch documents Intel Arc B-Series support and the XPU installation steps in its [Intel GPU guide](https://docs.pytorch.org/docs/stable/notes/get_start_xpu.html).
+
+```powershell
+python -m pip install --upgrade --force-reinstall torch --index-url https://download.pytorch.org/whl/xpu --extra-index-url https://pypi.org/simple
+python -c "import torch; print(torch.__version__); print(torch.xpu.is_available()); print(torch.xpu.get_device_name(0) if torch.xpu.is_available() else 'No XPU device')"
+python track_training.py --device xpu --generations 10
+```
+
+`--device xpu` fails rather than silently falling back if PyTorch or the Intel GPU driver cannot expose an XPU device. The tracker stores each run's champion and checkpoints in that run's own directory. Use `--resume-from PATH_TO_CHAMPION` to warm-start a later run without overwriting the source model. CUDA and CPU remain available through `--device cuda` and `--device cpu`; `auto` prefers XPU, then CUDA, then CPU.
+
 Train on one or more instrument files:
 
 ```bash

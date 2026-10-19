@@ -99,32 +99,24 @@ class Trainer:
             f"{self.champion_path}"
         )
 
-        if self.evaluator.using_cuda:
-            print("GPU available; using CPU reference evaluation until GPU parity is verified.")
-            print(f"CUDA device available: {self.evaluator.device}")
-
-            if torch.cuda.is_available():
-                gpu_name = torch.cuda.get_device_name(
-                    self.evaluator.device
-                )
-
+        if getattr(self.evaluator, "using_accelerator", False):
+            if self.evaluator.using_xpu:
+                gpu_name = torch.xpu.get_device_name(self.evaluator.device)
                 gpu_memory = (
-                    torch.cuda.get_device_properties(
-                        self.evaluator.device
-                    ).total_memory
+                    torch.xpu.get_device_properties(self.evaluator.device).total_memory
                     / (1024 ** 3)
                 )
-
-                print(
-                    f"GPU: {gpu_name}"
+            else:
+                gpu_name = torch.cuda.get_device_name(self.evaluator.device)
+                gpu_memory = (
+                    torch.cuda.get_device_properties(self.evaluator.device).total_memory
+                    / (1024 ** 3)
                 )
-
-                print(
-                    f"GPU memory: "
-                    f"{gpu_memory:.2f} GB"
-                )
+            print(f"Accelerated population evaluation: {self.evaluator.device}")
+            print(f"GPU: {gpu_name}")
+            print(f"GPU memory: {gpu_memory:.2f} GB")
         else:
-            print("GPU unavailable; using CPU reference evaluation.")
+            print("Using CPU reference evaluation.")
 
     def train(
         self,
@@ -449,17 +441,35 @@ class Trainer:
             episodes=self.episodes_per_agent,
             rng=episode_rng,
         )
-        results = []
         total = len(agents)
-        for index, agent in enumerate(agents, start=1):
-            per_dataset = [
-                self.evaluator.evaluate(
-                    agent,
+        per_agent_results: list[list[EvaluationResult]] = [
+            [] for _ in agents
+        ]
+        if getattr(self.evaluator, "using_accelerator", False):
+            for episode in episodes:
+                batch_results = self.evaluator.evaluate_population(
+                    agents,
                     episode.data,
                     start_step=self.evaluator.lookback - 1,
-                )
-                for episode in episodes
-            ]
+                ).results
+                for index, result in enumerate(batch_results):
+                    per_agent_results[index].append(result)
+        else:
+            for index, agent in enumerate(agents):
+                per_agent_results[index] = [
+                    self.evaluator.evaluate(
+                        agent,
+                        episode.data,
+                        start_step=self.evaluator.lookback - 1,
+                    )
+                    for episode in episodes
+                ]
+
+        results = []
+        for index, (agent, per_dataset) in enumerate(
+            zip(agents, per_agent_results),
+            start=1,
+        ):
             count = len(per_dataset)
             fitness_values: np.ndarray = np.asarray(
                 [item.fitness for item in per_dataset], dtype=np.float64
