@@ -89,7 +89,8 @@ TURNOVER_RE = re.compile(
 )
 
 GENERATION_TIME_RE = re.compile(
-    rf"Generation time:\s*({FLOAT_PATTERN})s"
+    rf"Generation time:\s*(?:(?P<hours>\d+)h\s*)?"
+    rf"(?:(?P<minutes>\d+)m\s*)?(?P<seconds>{FLOAT_PATTERN})s"
 )
 
 
@@ -558,8 +559,10 @@ class TrainingRunner:
         if generation_time_match:
             self.metrics[
                 "generation_time_seconds"
-            ] = float(
-                generation_time_match.group(1)
+            ] = (
+                3600.0 * float(generation_time_match.group("hours") or 0)
+                + 60.0 * float(generation_time_match.group("minutes") or 0)
+                + float(generation_time_match.group("seconds"))
             )
 
             self.finish_generation()
