@@ -62,7 +62,15 @@ python evolve.py --data data/raw/SPY_5m.csv data/raw/QQQ_5m.csv
 
 `config/training.yaml` sets the reproducibility seed and evaluation episode options. The default evaluates each candidate on eight windows per generation, randomizes start positions and instruments, and samples trailing-volatility regimes. `episode_bars: 0` chooses half of the shortest dataset's available post-lookback bars, leaving valid start choices. Every generation reuses the same sampled windows across candidates for a fair comparison; the next generation receives a new deterministic sample. Aggregate fitness blends the episode mean with the lower-quartile mean to penalize fragile candidates.
 
-Episode selections and per-episode results append to `models/archives/training_episodes.jsonl`. Champion and checkpoint artifacts include observation schema, seed, config hashes, instrument identifiers, and source-file hashes. Use `--seed`, `--generations`, `--checkpoint-dir`, and `--champion-dir` for explicit overrides. The current reference evaluator is serial; `training.parallel.enabled: true` is rejected instead of being silently ignored.
+Episode selections and per-episode results append to `models/archives/training_episodes.jsonl`. Champion and checkpoint artifacts include observation schema, seed, config hashes, instrument identifiers, and source-file hashes. Use `--seed`, `--generations`, `--checkpoint-dir`, and `--champion-dir` for explicit overrides. CPU training keeps the serial reference evaluator. XPU/CUDA training batches the population across up to `training.evaluation.accelerator_episodes_per_batch` sampled episodes (default `8`), increasing the neural-network lane batch from population size to population size times batched episodes. Episode sampling, count, fitness aggregation, and trading accounting are unchanged. Reduce this setting if device memory is constrained; `training.parallel.enabled: true` is not supported.
+
+Measure complete one-generation XPU throughput on deterministic synthetic data, comparing the prior one-episode-at-a-time behavior (`--batch-sizes 1`) with eight episode lanes (`--batch-sizes 8`):
+
+```powershell
+python benchmarks/benchmark_generation_batch.py --population 10 --rows 1024 --lookback 64 --episodes 8 --episode-bars 128 --batch-sizes 1 8 --repetitions 3 --seed 20261019 --output benchmarks/results/xpu_generation_batch.json
+```
+
+The report includes complete generation time (including aggregation and checkpoint/champion writing), agent-bars per second, champion metric parity, and PyTorch's peak XPU allocator usage. Synthetic throughput is not a trading-performance claim. Each lane is one agent on one sampled episode; agent-bars count simulated transitions across all agents and episodes, while unique source transitions are reported separately.
 
 Signals use completed bar data and execute at the next bar's open with half-spread, adverse slippage, and commission applied once. `execute_on_next_bar: false` is rejected because same-bar execution is not modeled.
 

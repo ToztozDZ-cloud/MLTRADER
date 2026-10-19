@@ -7,6 +7,7 @@ training:
 
   evaluation:
     episodes_per_agent: 8
+    accelerator_episodes_per_batch: 8
     # Zero selects half of the shortest dataset's available post-lookback bars.
     episode_bars: 0
     randomize_start: true

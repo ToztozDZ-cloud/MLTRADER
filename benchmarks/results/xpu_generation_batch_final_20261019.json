@@ -1,0 +1,231 @@
+{
+  "created_utc": "2026-10-19T13:26:34.285102+00:00",
+  "benchmark": "full one-generation XPU training using deterministic synthetic OHLCV",
+  "environment": {
+    "python": "3.12.14 (main, Aug 25 2026, 14:01:42) [MSC v.1944 64 bit (AMD64)]",
+    "os": "Windows-11-10.0.26200-SP0",
+    "pytorch": "2.14.1+xpu",
+    "xpu_name": "Intel(R) Arc(TM) B580 Graphics",
+    "xpu_total_memory_bytes": 12450455552
+  },
+  "configuration": {
+    "population": 10,
+    "rows": 1024,
+    "lookback": 64,
+    "episodes": 8,
+    "episode_bars": 128,
+    "seed": 20261019,
+    "warmups_per_batch_size": 1,
+    "repetitions": 3,
+    "market_episode_transitions_per_generation": 1024,
+    "agent_bars_definition": "sum of market transitions evaluated for every agent across sampled episodes",
+    "agent_bars_per_generation": 10240,
+    "unique_source_transition_bars": 596
+  },
+  "results": [
+    {
+      "episodes_per_batch": 1,
+      "lane_batch_size": 10,
+      "median_generation_seconds": 4.32998619999853,
+      "min_generation_seconds": 4.2847208000021055,
+      "max_generation_seconds": 4.42475509999349,
+      "median_agent_bars_per_second": 2364.9036110100024,
+      "median_peak_xpu_allocated_bytes": 1942528,
+      "runs": [
+        {
+          "episodes_per_batch": 1,
+          "total_gpu_agent_lanes": 10,
+          "market_episode_transitions": 1024,
+          "unique_source_transition_bars": 596,
+          "agent_bars": 10240,
+          "full_generation_seconds": 4.2847208000021055,
+          "agent_bars_per_second": 2389.887341082987,
+          "champion_fitness": -5.214605082346946,
+          "champion_metrics": {
+            "fitness": -5.214605082346946,
+            "final_equity": 96220.8525390625,
+            "total_return": -0.037791474609374986,
+            "max_drawdown": 0.12078583429224254,
+            "trade_count": 604
+          },
+          "peak_xpu_allocated_bytes": 1942528,
+          "checkpoint_and_champion_writing_included": true
+        },
+        {
+          "episodes_per_batch": 1,
+          "total_gpu_agent_lanes": 10,
+          "market_episode_transitions": 1024,
+          "unique_source_transition_bars": 596,
+          "agent_bars": 10240,
+          "full_generation_seconds": 4.32998619999853,
+          "agent_bars_per_second": 2364.9036110100024,
+          "champion_fitness": -5.214605082346946,
+          "champion_metrics": {
+            "fitness": -5.214605082346946,
+            "final_equity": 96220.8525390625,
+            "total_return": -0.037791474609374986,
+            "max_drawdown": 0.12078583429224254,
+            "trade_count": 604
+          },
+          "peak_xpu_allocated_bytes": 1942528,
+          "checkpoint_and_champion_writing_included": true
+        },
+        {
+          "episodes_per_batch": 1,
+          "total_gpu_agent_lanes": 10,
+          "market_episode_transitions": 1024,
+          "unique_source_transition_bars": 596,
+          "agent_bars": 10240,
+          "full_generation_seconds": 4.42475509999349,
+          "agent_bars_per_second": 2314.252375236556,
+          "champion_fitness": -5.214605082346946,
+          "champion_metrics": {
+            "fitness": -5.214605082346946,
+            "final_equity": 96220.8525390625,
+            "total_return": -0.037791474609374986,
+            "max_drawdown": 0.12078583429224254,
+            "trade_count": 604
+          },
+          "peak_xpu_allocated_bytes": 1942528,
+          "checkpoint_and_champion_writing_included": true
+        }
+      ],
+      "speedup_vs_first_batch_size": 1.0,
+      "paired_correctness_checks_vs_first_batch_size": [
+        {
+          "metrics_match_within_tolerance": true,
+          "absolute_differences": {
+            "fitness": 0.0,
+            "final_equity": 0.0,
+            "total_return": 0.0,
+            "max_drawdown": 0.0
+          }
+        },
+        {
+          "metrics_match_within_tolerance": true,
+          "absolute_differences": {
+            "fitness": 0.0,
+            "final_equity": 0.0,
+            "total_return": 0.0,
+            "max_drawdown": 0.0
+          }
+        },
+        {
+          "metrics_match_within_tolerance": true,
+          "absolute_differences": {
+            "fitness": 0.0,
+            "final_equity": 0.0,
+            "total_return": 0.0,
+            "max_drawdown": 0.0
+          }
+        }
+      ],
+      "all_champion_metrics_match": true
+    },
+    {
+      "episodes_per_batch": 8,
+      "lane_batch_size": 80,
+      "median_generation_seconds": 0.7221368999962579,
+      "min_generation_seconds": 0.7106970999957412,
+      "max_generation_seconds": 0.7599914000020362,
+      "median_agent_bars_per_second": 14180.136758076016,
+      "median_peak_xpu_allocated_bytes": 14517760,
+      "runs": [
+        {
+          "episodes_per_batch": 8,
+          "total_gpu_agent_lanes": 80,
+          "market_episode_transitions": 1024,
+          "unique_source_transition_bars": 596,
+          "agent_bars": 10240,
+          "full_generation_seconds": 0.7221368999962579,
+          "agent_bars_per_second": 14180.136758076016,
+          "champion_fitness": -5.214601974549284,
+          "champion_metrics": {
+            "fitness": -5.214601974549284,
+            "final_equity": 96220.857421875,
+            "total_return": -0.03779142578125001,
+            "max_drawdown": 0.12078614552113998,
+            "trade_count": 604
+          },
+          "peak_xpu_allocated_bytes": 14517760,
+          "checkpoint_and_champion_writing_included": true
+        },
+        {
+          "episodes_per_batch": 8,
+          "total_gpu_agent_lanes": 80,
+          "market_episode_transitions": 1024,
+          "unique_source_transition_bars": 596,
+          "agent_bars": 10240,
+          "full_generation_seconds": 0.7599914000020362,
+          "agent_bars_per_second": 13473.836677589463,
+          "champion_fitness": -5.214601974549284,
+          "champion_metrics": {
+            "fitness": -5.214601974549284,
+            "final_equity": 96220.857421875,
+            "total_return": -0.03779142578125001,
+            "max_drawdown": 0.12078614552113998,
+            "trade_count": 604
+          },
+          "peak_xpu_allocated_bytes": 14517760,
+          "checkpoint_and_champion_writing_included": true
+        },
+        {
+          "episodes_per_batch": 8,
+          "total_gpu_agent_lanes": 80,
+          "market_episode_transitions": 1024,
+          "unique_source_transition_bars": 596,
+          "agent_bars": 10240,
+          "full_generation_seconds": 0.7106970999957412,
+          "agent_bars_per_second": 14408.388608960644,
+          "champion_fitness": -5.214601974549284,
+          "champion_metrics": {
+            "fitness": -5.214601974549284,
+            "final_equity": 96220.857421875,
+            "total_return": -0.03779142578125001,
+            "max_drawdown": 0.12078614552113998,
+            "trade_count": 604
+          },
+          "peak_xpu_allocated_bytes": 14517760,
+          "checkpoint_and_champion_writing_included": true
+        }
+      ],
+      "speedup_vs_first_batch_size": 5.996073874664164,
+      "paired_correctness_checks_vs_first_batch_size": [
+        {
+          "metrics_match_within_tolerance": true,
+          "absolute_differences": {
+            "fitness": 3.1077976618831826e-06,
+            "final_equity": 0.0048828125,
+            "total_return": 4.882812497386535e-08,
+            "max_drawdown": 3.1122889743162574e-07
+          }
+        },
+        {
+          "metrics_match_within_tolerance": true,
+          "absolute_differences": {
+            "fitness": 3.1077976618831826e-06,
+            "final_equity": 0.0048828125,
+            "total_return": 4.882812497386535e-08,
+            "max_drawdown": 3.1122889743162574e-07
+          }
+        },
+        {
+          "metrics_match_within_tolerance": true,
+          "absolute_differences": {
+            "fitness": 3.1077976618831826e-06,
+            "final_equity": 0.0048828125,
+            "total_return": 4.882812497386535e-08,
+            "max_drawdown": 3.1122889743162574e-07
+          }
+        }
+      ],
+      "all_champion_metrics_match": true
+    }
+  ],
+  "correctness_note": "Both paths use the same seeded genomes and episode windows; paired champion metrics are checked with explicit floating-point tolerances.",
+  "limitations": [
+    "Synthetic daily OHLCV is used; results are a throughput comparison, not a trading-performance claim.",
+    "Generation timing includes evaluation, aggregation, and checkpoint/champion serialization.",
+    "Only PyTorch allocator peak is reported; system-wide GPU utilization telemetry is not available here."
+  ]
+}

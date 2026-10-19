@@ -434,7 +434,7 @@ def main() -> None:
     parallel_config = training_section.get("parallel", {})
     if bool(parallel_config.get("enabled", False)):
         raise ValueError(
-            "Parallel population evaluation is not supported by the current CPU reference evaluator; "
+            "Parallel population evaluation is not supported by the current trainer; "
             "set training.parallel.enabled to false."
         )
 
@@ -572,6 +572,9 @@ def main() -> None:
         champion_dir=args.champion_dir,
         champion_filename=CHAMPION_FILENAME,
         episodes_per_agent=int(evaluation_config.get("episodes_per_agent", 1)),
+        accelerator_episodes_per_batch=int(
+            evaluation_config.get("accelerator_episodes_per_batch", 8)
+        ),
         episode_bars=int(evaluation_config.get("episode_bars", 0)),
         randomize_start=bool(evaluation_config.get("randomize_start", False)),
         randomize_instrument=bool(evaluation_config.get("randomize_instrument", False)),

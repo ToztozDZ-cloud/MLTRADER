@@ -28,6 +28,7 @@ class Trainer:
         champion_dir: str | Path = "models/champions",
         champion_filename: str = "best_agent.json",
         episodes_per_agent: int = 1,
+        accelerator_episodes_per_batch: int = 8,
         episode_bars: int = 0,
         randomize_start: bool = False,
         randomize_instrument: bool = False,
@@ -44,6 +45,7 @@ class Trainer:
         self.evaluator = evaluator
         self.generations = int(generations)
         self.episodes_per_agent = int(episodes_per_agent)
+        self.accelerator_episodes_per_batch = int(accelerator_episodes_per_batch)
         self.seed = int(seed)
         self.resume_champion = bool(resume_champion)
         self.model_metadata = dict(model_metadata or {})
@@ -54,6 +56,8 @@ class Trainer:
             raise ValueError("checkpoint_every must be at least one")
         if self.episodes_per_agent < 1:
             raise ValueError("episodes_per_agent must be at least one")
+        if self.accelerator_episodes_per_batch < 1:
+            raise ValueError("accelerator_episodes_per_batch must be at least one")
         self.episode_sampler = TrainingEpisodeSampler(
             lookback=self.evaluator.lookback,
             episode_bars=episode_bars,
@@ -446,14 +450,20 @@ class Trainer:
             [] for _ in agents
         ]
         if getattr(self.evaluator, "using_accelerator", False):
-            for episode in episodes:
-                batch_results = self.evaluator.evaluate_population(
+            for offset in range(
+                0, len(episodes), self.accelerator_episodes_per_batch
+            ):
+                episode_batch = episodes[
+                    offset : offset + self.accelerator_episodes_per_batch
+                ]
+                episode_results = self.evaluator.evaluate_population_episodes(
                     agents,
-                    episode.data,
+                    [episode.data for episode in episode_batch],
                     start_step=self.evaluator.lookback - 1,
-                ).results
-                for index, result in enumerate(batch_results):
-                    per_agent_results[index].append(result)
+                )
+                for batch_results in episode_results:
+                    for index, result in enumerate(batch_results):
+                        per_agent_results[index].append(result)
         else:
             for index, agent in enumerate(agents):
                 per_agent_results[index] = [

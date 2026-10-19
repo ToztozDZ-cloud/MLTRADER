@@ -507,6 +507,84 @@ class AgentEvaluator:
             results=results
         )
 
+    def evaluate_population_episodes(
+        self,
+        agents: Sequence[Agent],
+        episodes: Sequence[pd.DataFrame],
+        start_step: int | None = None,
+    ) -> list[list[EvaluationResult]]:
+        if not agents:
+            return [[] for _ in episodes]
+        if not episodes:
+            return []
+
+        if start_step is None:
+            start_step = self.lookback - 1
+        if start_step < self.lookback - 1:
+            raise ValueError("start_step must be at least lookback - 1.")
+
+        market_frames = [
+            MarketEnvironment(data=frame, initial_cash=self.initial_cash).data
+            for frame in episodes
+        ]
+        row_counts = {len(frame) for frame in market_frames}
+        if len(row_counts) != 1:
+            raise ValueError("All batched episodes must have the same number of rows.")
+        if next(iter(row_counts)) <= start_step + 1:
+            raise ValueError("Episodes must contain at least one evaluation bar.")
+
+        self._synchronize_device()
+        observations_by_episode = [
+            self._precompute_observations(frame, start_step)
+            for frame in market_frames
+        ]
+        market_observations = np.stack(observations_by_episode, axis=1)
+        market_prices = np.stack(
+            [self._extract_prices(frame) for frame in market_frames], axis=1
+        )
+        market_opens = np.stack(
+            [frame["open"].to_numpy(dtype=np.float32) for frame in market_frames],
+            axis=1,
+        )
+        market_flatten = np.stack(
+            [self._precompute_flatten_mask(frame) for frame in market_frames], axis=1
+        )
+
+        population_size = len(agents)
+        batch_observations = np.repeat(
+            market_observations, population_size, axis=1
+        )
+        batch_prices = np.repeat(market_prices, population_size, axis=1)
+        batch_opens = np.repeat(market_opens, population_size, axis=1)
+        batch_flatten = np.repeat(market_flatten, population_size, axis=1)
+        batch_agents = list(agents) * len(market_frames)
+
+        observation_tensor = torch.from_numpy(batch_observations).to(
+            self.device, dtype=torch.float32
+        )
+        price_tensor = torch.from_numpy(batch_prices).to(
+            self.device, dtype=torch.float32
+        )
+        open_tensor = torch.from_numpy(batch_opens).to(
+            self.device, dtype=torch.float32
+        )
+        flatten_tensor = torch.from_numpy(batch_flatten).to(self.device)
+        compiled = self._compile_population(batch_agents)
+        flat_results = self._simulate_population(
+            agents=batch_agents,
+            observations=observation_tensor,
+            prices=price_tensor,
+            opens=open_tensor,
+            force_flatten=flatten_tensor,
+            compiled=compiled,
+            start_step=start_step,
+        )
+
+        return [
+            flat_results[offset : offset + population_size]
+            for offset in range(0, len(flat_results), population_size)
+        ]
+
     # ==========================================================
     # MARKET PREPROCESSING
     # ==========================================================
@@ -1551,7 +1629,8 @@ class AgentEvaluator:
 
         print(
             f"{self.device.type.upper()} evaluation | "
-            f"{population_size} agents | "
+            f"{population_size} "
+            f"{'agent-episode lanes' if observations.ndim == 3 else 'agents'} | "
             f"{steps:,} bars"
         )
 
@@ -1599,17 +1678,15 @@ class AgentEvaluator:
                 / safe_equity
             )
 
-            batch_observation = (
-                observations[
-                    relative_step
-                ]
-                .unsqueeze(0)
-                .expand(
-                    population_size,
-                    -1,
+            if observations.ndim == 3:
+                batch_observation = observations[relative_step]
+            else:
+                batch_observation = (
+                    observations[relative_step]
+                    .unsqueeze(0)
+                    .expand(population_size, -1)
+                    .clone()
                 )
-                .clone()
-            )
 
             batch_observation[:, -4] = cash_fraction
             batch_observation[:, -3] = position_fraction
@@ -1784,7 +1861,7 @@ class AgentEvaluator:
             f"{self.device.type.upper()} evaluation complete | "
             f"{steps:,} bars | "
             f"{total_elapsed:.2f}s | "
-            f"{steps / total_elapsed:.2f} bar/s"
+            f"{steps * population_size / total_elapsed:.2f} agent-bars/s"
         )
 
         turnover_cpu = (
