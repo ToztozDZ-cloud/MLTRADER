@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import time
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Callable, Sequence
 
 import numpy as np
 import pandas as pd
@@ -103,6 +103,7 @@ class AgentEvaluator:
         agent: Agent,
         market_data: pd.DataFrame,
         start_step: int | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> EvaluationResult:
         market = MarketEnvironment(
             data=market_data,
@@ -159,6 +160,9 @@ class AgentEvaluator:
         ]
 
         turnover = 0.0
+        total_steps = len(market) - start_step - 1
+        completed_steps = 0
+        progress_interval = max(1, total_steps // 100)
 
         while not market.done:
             observation = observation_builder.build(
@@ -256,6 +260,13 @@ class AgentEvaluator:
                     market.current_price
                 )
             )
+
+            completed_steps += 1
+            if progress_callback is not None and (
+                completed_steps % progress_interval == 0
+                or completed_steps >= total_steps
+            ):
+                progress_callback(completed_steps, total_steps)
 
         if portfolio.position != 0.0:
             final_price = market.current_price
