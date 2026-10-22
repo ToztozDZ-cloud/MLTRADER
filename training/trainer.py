@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import time
 from pathlib import Path
 
@@ -446,9 +447,37 @@ class Trainer:
             rng=episode_rng,
         )
         total = len(agents)
+        total_bars = sum(
+            max(0, len(episode.data) - self.evaluator.lookback)
+            * total
+            for episode in episodes
+        )
+        progress_started = time.perf_counter()
+        completed_bars = 0
+
+        def report_progress(completed: int, steps: int, offset: int, multiplier: int) -> None:
+            overall_completed = min(
+                total_bars,
+                offset + completed * multiplier,
+            )
+            elapsed = time.perf_counter() - progress_started
+            rate = overall_completed / elapsed if elapsed > 0 else 0.0
+            percentage = 100.0 * overall_completed / total_bars if total_bars else 100.0
+            eta = (total_bars - overall_completed) / rate if rate > 0 else 0.0
+            print(
+                f"\rTraining progress: {percentage:.2f}% | "
+                f"{overall_completed:,}/{total_bars:,} bars | "
+                f"{rate:.2f} bars/s | ETA {AgentEvaluator._format_duration(eta)}",
+                end="\n" if overall_completed >= total_bars else "\r",
+                flush=True,
+            )
+
         per_agent_results: list[list[EvaluationResult]] = [
             [] for _ in agents
         ]
+        supports_progress = "progress_callback" in inspect.signature(
+            self.evaluator.evaluate
+        ).parameters
         if getattr(self.evaluator, "using_accelerator", False):
             for offset in range(
                 0, len(episodes), self.accelerator_episodes_per_batch
@@ -456,24 +485,53 @@ class Trainer:
                 episode_batch = episodes[
                     offset : offset + self.accelerator_episodes_per_batch
                 ]
+                batch_offset = completed_bars
+                batch_multiplier = len(agents) * len(episode_batch)
                 episode_results = self.evaluator.evaluate_population_episodes(
                     agents,
                     [episode.data for episode in episode_batch],
                     start_step=self.evaluator.lookback - 1,
+                    progress_callback=lambda completed, steps: report_progress(
+                        completed,
+                        steps,
+                        batch_offset,
+                        batch_multiplier,
+                    ),
                 )
                 for batch_results in episode_results:
                     for index, result in enumerate(batch_results):
                         per_agent_results[index].append(result)
+                completed_bars += sum(
+                    max(0, len(episode.data) - self.evaluator.lookback)
+                    * len(agents)
+                    for episode in episode_batch
+                )
         else:
             for index, agent in enumerate(agents):
-                per_agent_results[index] = [
-                    self.evaluator.evaluate(
+                agent_results = []
+                for episode in episodes:
+                    episode_offset = completed_bars
+                    evaluation_options = {
+                        "start_step": self.evaluator.lookback - 1,
+                    }
+                    if supports_progress:
+                        evaluation_options["progress_callback"] = lambda completed, steps: report_progress(
+                            completed,
+                            steps,
+                            episode_offset,
+                            1,
+                        )
+                    result = self.evaluator.evaluate(
                         agent,
                         episode.data,
-                        start_step=self.evaluator.lookback - 1,
+                        **evaluation_options,
                     )
-                    for episode in episodes
-                ]
+                    agent_results.append(result)
+                    completed_bars += max(
+                        0,
+                        len(episode.data) - self.evaluator.lookback,
+                    )
+                per_agent_results[index] = agent_results
 
         results = []
         for index, (agent, per_dataset) in enumerate(

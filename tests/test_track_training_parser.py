@@ -43,3 +43,53 @@ def test_training_runner_records_generation_metrics(
     assert float(row["best_fitness"]) == pytest.approx(-4.786151)
     assert float(row["return_percent"]) == pytest.approx(-2.37)
     assert float(row["generation_time_seconds"]) == pytest.approx(expected_seconds)
+
+
+def test_training_runner_emits_simulation_progress(tmp_path):
+    events = Queue()
+    runner = track_training.TrainingRunner(
+        command=[],
+        run_dir=tmp_path,
+        history_csv=tmp_path / "history.csv",
+        events=events,
+    )
+
+    runner.process_line("Generations: 500")
+    runner.process_line("Generation 0012")
+    runner.process_line(
+        "\rTraining progress: 12.50% | 1,000/8,000 bars | "
+        "12.34 bars/s | ETA 9m 27s"
+    )
+
+    received = []
+    while not events.empty():
+        received.append(events.get_nowait())
+
+    assert ("system", {"total_generations": 500}) in received
+    progress = next(payload for kind, payload in received if kind == "progress")
+    assert progress == {
+        "percentage": 12.5,
+        "completed": 1000,
+        "total": 8000,
+        "rate": 12.34,
+        "eta": "9m 27s",
+        "generation": 12,
+    }
+
+
+def test_champion_snapshot_uses_run_scoped_champion(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    champion_dir = run_dir / "champions"
+    champion_dir.mkdir(parents=True)
+    champion = champion_dir / track_training.CHAMPION_PATH.name
+    champion.write_text("run champion", encoding="utf-8")
+    monkeypatch.setattr(
+        track_training,
+        "CHAMPION_PATH",
+        tmp_path / "unrelated" / "best_agent.json",
+    )
+
+    snapshot = track_training.save_champion_snapshot(run_dir, 3)
+
+    assert snapshot == run_dir / "generation_0003.json"
+    assert snapshot.read_text(encoding="utf-8") == "run champion"

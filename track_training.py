@@ -33,6 +33,7 @@ import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.ticker import MaxNLocator
 import tkinter as tk
+from tkinter import ttk
 
 
 # ============================================================================
@@ -91,6 +92,14 @@ TURNOVER_RE = re.compile(
 GENERATION_TIME_RE = re.compile(
     rf"Generation time:\s*(?:(?P<hours>\d+)h\s*)?"
     rf"(?:(?P<minutes>\d+)m\s*)?(?P<seconds>{FLOAT_PATTERN})s"
+)
+
+GENERATION_COUNT_RE = re.compile(r"Generations:\s*(\d+)")
+
+PROGRESS_RE = re.compile(
+    rf"Training progress:\s*(?P<percentage>{FLOAT_PATTERN})%\s*\|\s*"
+    r"(?P<completed>[\d,]+)/(?P<total>[\d,]+) bars\s*\|\s*"
+    rf"(?P<rate>{FLOAT_PATTERN}) bars/s\s*\|\s*ETA\s*(?P<eta>.+)"
 )
 
 
@@ -317,7 +326,8 @@ def save_champion_snapshot(
     run_dir: Path,
     generation: int,
 ) -> Path | None:
-    if not CHAMPION_PATH.exists():
+    run_champion_path = run_dir / "champions" / CHAMPION_PATH.name
+    if not run_champion_path.exists():
         return None
 
     snapshot_path = (
@@ -326,7 +336,7 @@ def save_champion_snapshot(
     )
 
     shutil.copy2(
-        CHAMPION_PATH,
+        run_champion_path,
         snapshot_path,
     )
 
@@ -455,6 +465,34 @@ class TrainingRunner:
         self,
         line: str,
     ) -> None:
+        if line:
+            self.events.put(("log", {"line": line}))
+
+        progress_match = PROGRESS_RE.search(line)
+        if progress_match:
+            self.events.put(
+                (
+                    "progress",
+                    {
+                        "percentage": float(progress_match.group("percentage")),
+                        "completed": int(progress_match.group("completed").replace(",", "")),
+                        "total": int(progress_match.group("total").replace(",", "")),
+                        "rate": float(progress_match.group("rate")),
+                        "eta": progress_match.group("eta").strip(),
+                        "generation": self.current_generation,
+                    },
+                )
+            )
+
+        generation_count_match = GENERATION_COUNT_RE.search(line)
+        if generation_count_match:
+            self.events.put(
+                ("system", {"total_generations": int(generation_count_match.group(1))})
+            )
+
+        if line.startswith(("GPU:", "GPU memory:", "Accelerated population evaluation:")):
+            self.events.put(("system", {"line": line}))
+
         # ------------------------------------------------------------
         # Generation
         # ------------------------------------------------------------
@@ -683,173 +721,382 @@ class TrainingGraph:
 
         self.closed = False
         self.training_finished = False
-
-        # ================================================================
-        # WINDOW 1 — RETURN
-        # ================================================================
-
-        self.root.title("MLTRADER — Return Curve")
-        self.root.geometry("1100x700")
-        self.root.minsize(850, 550)
+        self.total_generations = 0
+        self.generation_durations: list[float] = []
+        self.palette = {
+            "background": "#080d16",
+            "panel": "#111b2b",
+            "panel_alt": "#17243a",
+            "border": "#26364d",
+            "text": "#e7eefb",
+            "muted": "#91a2ba",
+            "blue": "#45b8ff",
+            "cyan": "#67d9e8",
+            "green": "#43d6a3",
+            "red": "#f27878",
+        }
+        self.root.title("MLTRADER | Training Dashboard")
+        self.root.geometry("1440x960")
+        self.root.minsize(1050, 720)
+        self.root.configure(bg=self.palette["background"])
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-        header = tk.Frame(self.root, padx=12, pady=8)
-        header.pack(side=tk.TOP, fill=tk.X)
-
-        self.status_label = tk.Label(
-            header,
-            text="Starting MLTRADER training...",
-            anchor="w",
-            font=("Segoe UI", 11, "bold"),
-        )
-        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.latest_label = tk.Label(
-            header,
-            text="No generation completed yet",
-            anchor="e",
-            font=("Segoe UI", 10),
-        )
-        self.latest_label.pack(side=tk.RIGHT)
-
-        self.figure_return, self.axis_return = plt.subplots(
-            figsize=(11, 7),
-            dpi=100,
-        )
-
-        self.axis_return.set_title(
-            "MLTRADER Evolution — Return by Generation"
-        )
-        self.axis_return.set_xlabel("Generation")
-        self.axis_return.set_ylabel("Return (%)")
-        self.axis_return.grid(True, alpha=0.25)
-        self.axis_return.axhline(
-            y=0.0,
-            linewidth=1.0,
-            linestyle="--",
-            alpha=0.5,
-        )
-        self.axis_return.xaxis.set_major_locator(
-            MaxNLocator(integer=True, nbins=15)
-        )
-
-        self.return_line, = self.axis_return.plot(
-            [], [],
-            marker="o",
-            linewidth=1.5,
-            markersize=5,
-        )
-
-        self.canvas_return = FigureCanvasTkAgg(
-            self.figure_return,
-            master=self.root,
-        )
-        self.canvas_return.get_tk_widget().pack(
-            side=tk.TOP,
-            fill=tk.BOTH,
-            expand=True,
-            padx=10,
-            pady=(0, 10),
-        )
-        self.canvas_return.draw()
-
-        # ================================================================
-        # WINDOW 2 — FITNESS + FINAL EQUITY
-        # ================================================================
-
-        self.metrics_window = tk.Toplevel(self.root)
-        self.metrics_window.title(
-            "MLTRADER — Fitness & Final Equity"
-        )
-        self.metrics_window.geometry("1400x1000")
-        self.metrics_window.minsize(1000, 750)
-        self.metrics_window.protocol(
-            "WM_DELETE_WINDOW",
-            self.on_close,
-        )
-
-        metrics_header = tk.Frame(
-            self.metrics_window,
-            padx=12,
-            pady=8,
-        )
-        metrics_header.pack(
-            side=tk.TOP,
-            fill=tk.X,
-        )
-
-        self.metrics_label = tk.Label(
-            metrics_header,
-            text="No generation completed yet",
-            anchor="w",
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("TNotebook", background=self.palette["background"], borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            background=self.palette["panel"],
+            foreground=self.palette["muted"],
+            padding=(18, 11),
             font=("Segoe UI", 10, "bold"),
         )
-        self.metrics_label.pack(
-            side=tk.LEFT,
-            fill=tk.X,
-            expand=True,
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", self.palette["panel_alt"])],
+            foreground=[("selected", self.palette["text"])],
+        )
+        style.configure(
+            "Training.Horizontal.TProgressbar",
+            troughcolor=self.palette["panel_alt"],
+            background=self.palette["blue"],
+            bordercolor=self.palette["panel_alt"],
+            lightcolor=self.palette["blue"],
+            darkcolor=self.palette["blue"],
+        )
+        style.configure(
+            "History.Treeview",
+            background=self.palette["panel"],
+            fieldbackground=self.palette["panel"],
+            foreground=self.palette["text"],
+            rowheight=30,
+            borderwidth=0,
+        )
+        style.configure(
+            "History.Treeview.Heading",
+            background=self.palette["panel_alt"],
+            foreground=self.palette["muted"],
+            font=("Segoe UI", 9, "bold"),
         )
 
-        # Four live diagnostic plots arranged as a single dashboard.
-        chart_frame = tk.Frame(self.metrics_window, padx=8, pady=4)
-        chart_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        header = tk.Frame(self.root, bg=self.palette["background"], padx=28, pady=20)
+        header.pack(fill=tk.X)
+        tk.Label(
+            header,
+            text="MLTRADER",
+            bg=self.palette["background"],
+            fg=self.palette["blue"],
+            font=("Segoe UI", 11, "bold"),
+        ).pack(anchor="w")
+        self.status_label = tk.Label(
+            header,
+            text="Starting training...",
+            bg=self.palette["background"],
+            fg=self.palette["text"],
+            font=("Segoe UI", 20, "bold"),
+            anchor="w",
+        )
+        self.status_label.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=(4, 0))
+        self.latest_label = tk.Label(
+            header,
+            text="No generation completed",
+            bg=self.palette["background"],
+            fg=self.palette["muted"],
+            font=("Segoe UI", 10),
+            anchor="e",
+        )
+        self.latest_label.pack(side=tk.RIGHT, pady=(14, 0))
 
-        self.figure_fitness, self.axis_fitness = plt.subplots(figsize=(6.5, 3.2), dpi=100)
-        self.axis_fitness.set_title("Best Fitness by Generation")
-        self.axis_fitness.set_xlabel("Generation")
-        self.axis_fitness.set_ylabel("Fitness")
-        self.axis_fitness.grid(True, alpha=0.25)
-        self.axis_fitness.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
-        self.fitness_line, = self.axis_fitness.plot([], [], marker="o", linewidth=1.5, markersize=3)
-        self.canvas_fitness = FigureCanvasTkAgg(self.figure_fitness, master=chart_frame)
-        self.canvas_fitness.get_tk_widget().grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        self.canvas_fitness.draw()
+        self.notebook = ttk.Notebook(self.root)
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=20, pady=(0, 20))
+        self.overview_tab = tk.Frame(self.notebook, bg=self.palette["background"], padx=14, pady=18)
+        self.analytics_tab = tk.Frame(self.notebook, bg=self.palette["background"], padx=14, pady=18)
+        self.history_tab = tk.Frame(self.notebook, bg=self.palette["background"], padx=14, pady=18)
+        self.system_tab = tk.Frame(self.notebook, bg=self.palette["background"], padx=14, pady=18)
+        self.notebook.add(self.overview_tab, text="Overview")
+        self.notebook.add(self.analytics_tab, text="Charts")
+        self.notebook.add(self.history_tab, text="History")
+        self.notebook.add(self.system_tab, text="System")
 
-        self.figure_equity, self.axis_equity = plt.subplots(figsize=(6.5, 3.2), dpi=100)
-        self.axis_equity.set_title("Champion Final Equity")
-        self.axis_equity.set_xlabel("Generation")
-        self.axis_equity.set_ylabel("Final Equity (USD)")
-        self.axis_equity.grid(True, alpha=0.25)
-        self.axis_equity.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
-        self.equity_line, = self.axis_equity.plot([], [], marker="o", linewidth=1.5, markersize=3)
-        self.canvas_equity = FigureCanvasTkAgg(self.figure_equity, master=chart_frame)
-        self.canvas_equity.get_tk_widget().grid(row=0, column=1, sticky="nsew", padx=4, pady=4)
-        self.canvas_equity.draw()
+        self.kpi_values: dict[str, tk.Label] = {}
+        kpi_row = tk.Frame(self.overview_tab, bg=self.palette["background"])
+        kpi_row.pack(fill=tk.X, pady=(0, 14))
+        for key, title, initial in (
+            ("fitness", "FITNESS DE L'AGENT", "—"),
+            ("return", "RETURN", "—"),
+            ("equity", "END CAPITAL", "—"),
+            ("drawdown", "MAX DRAWDOWN", "—"),
+        ):
+            card = self._card(kpi_row)
+            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+            tk.Label(card, text=title, bg=self.palette["panel"], fg=self.palette["muted"], font=("Segoe UI", 9, "bold")).pack(anchor="w")
+            value = tk.Label(card, text=initial, bg=self.palette["panel"], fg=self.palette["text"], font=("Segoe UI", 21, "bold"))
+            value.pack(anchor="w", pady=(12, 0))
+            self.kpi_values[key] = value
 
-        self.figure_return, self.axis_return = plt.subplots(figsize=(6.5, 3.2), dpi=100)
-        self.axis_return.set_title("Champion Return by Generation")
-        self.axis_return.set_xlabel("Generation")
-        self.axis_return.set_ylabel("Return (%)")
-        self.axis_return.axhline(y=0.0, linewidth=1.0, linestyle="--", alpha=0.6)
-        self.axis_return.grid(True, alpha=0.25)
-        self.axis_return.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
-        self.return_line, = self.axis_return.plot([], [], marker="o", linewidth=1.5, markersize=3)
-        self.canvas_return = FigureCanvasTkAgg(self.figure_return, master=chart_frame)
-        self.canvas_return.get_tk_widget().grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        self.canvas_return.draw()
+        progress_card = self._card(self.overview_tab)
+        progress_card.pack(fill=tk.X, pady=(0, 14))
+        progress_heading = tk.Frame(progress_card, bg=self.palette["panel"])
+        progress_heading.pack(fill=tk.X)
+        tk.Label(progress_heading, text="SIMULATION EN COURS", bg=self.palette["panel"], fg=self.palette["text"], font=("Segoe UI", 10, "bold")).pack(side=tk.LEFT)
+        self.progress_label = tk.Label(progress_heading, text="Waiting for simulation", bg=self.palette["panel"], fg=self.palette["muted"], font=("Segoe UI", 10))
+        self.progress_label.pack(side=tk.RIGHT)
+        self.progress_bar = ttk.Progressbar(progress_card, style="Training.Horizontal.TProgressbar", maximum=100)
+        self.progress_bar.pack(fill=tk.X, pady=(14, 10))
+        self.speed_label = tk.Label(progress_card, text="0 bars/s  ·  ETA globale —", bg=self.palette["panel"], fg=self.palette["muted"], font=("Segoe UI", 10))
+        self.speed_label.pack(anchor="w")
+        self.metrics_label = tk.Label(progress_card, text="Waiting for generation metrics", bg=self.palette["panel"], fg=self.palette["muted"], font=("Segoe UI", 9))
+        self.metrics_label.pack(anchor="w", pady=(8, 0))
 
-        self.figure_risk, self.axis_risk = plt.subplots(figsize=(6.5, 3.2), dpi=100)
-        self.axis_risk.set_title("Maximum Drawdown and Turnover")
-        self.axis_risk.set_xlabel("Generation")
-        self.axis_risk.set_ylabel("Max drawdown (%)")
-        self.axis_risk.grid(True, alpha=0.25)
-        self.axis_risk.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
-        self.drawdown_line, = self.axis_risk.plot([], [], marker="o", linewidth=1.5, markersize=3, label="Max drawdown")
-        self.axis_turnover = self.axis_risk.twinx()
-        self.turnover_line, = self.axis_turnover.plot([], [], linestyle="--", linewidth=1.2, label="Turnover")
-        self.axis_turnover.set_ylabel("Turnover")
-        self.axis_risk.legend(loc="upper left")
-        self.axis_turnover.legend(loc="upper right")
-        self.canvas_risk = FigureCanvasTkAgg(self.figure_risk, master=chart_frame)
-        self.canvas_risk.get_tk_widget().grid(row=1, column=1, sticky="nsew", padx=4, pady=4)
-        self.canvas_risk.draw()
+        overview_note = self._card(self.overview_tab)
+        overview_note.pack(fill=tk.BOTH, expand=True)
+        tk.Label(overview_note, text="Latest activity", bg=self.palette["panel"], fg=self.palette["text"], font=("Segoe UI", 11, "bold")).pack(anchor="w")
+        self.activity_label = tk.Label(overview_note, text="The evaluator will start shortly.", bg=self.palette["panel"], fg=self.palette["muted"], font=("Segoe UI", 10), justify=tk.LEFT, anchor="nw")
+        self.activity_label.pack(fill=tk.BOTH, expand=True, anchor="nw", pady=(12, 0))
 
-        chart_frame.grid_rowconfigure(0, weight=1)
-        chart_frame.grid_rowconfigure(1, weight=1)
-        chart_frame.grid_columnconfigure(0, weight=1)
-        chart_frame.grid_columnconfigure(1, weight=1)
+        analytics_header = tk.Frame(self.analytics_tab, bg=self.palette["background"])
+        analytics_header.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(analytics_header, text="Generation analytics", bg=self.palette["background"], fg=self.palette["text"], font=("Segoe UI", 14, "bold")).pack(side=tk.LEFT)
+        ttk.Button(analytics_header, text="+ Add chart", command=self.add_chart).pack(side=tk.RIGHT)
+        self.chart_canvas = tk.Canvas(self.analytics_tab, bg=self.palette["background"], highlightthickness=0)
+        self.chart_canvas.pack(fill=tk.BOTH, expand=True)
+        self.chart_content = tk.Frame(self.chart_canvas, bg=self.palette["background"])
+        self.chart_window = self.chart_canvas.create_window((0, 0), window=self.chart_content, anchor="nw")
+        self.chart_canvas.bind("<Configure>", self.resize_chart_area)
+        self.chart_content.bind("<Configure>", self.update_chart_scrollregion)
+        self.charts: list[dict] = []
+        for series in ("Fitness", "Return", "End capital", "Max drawdown"):
+            self.add_chart(series)
+
+        history_columns = ("generation", "fitness", "return", "equity", "drawdown", "duration")
+        self.history_table = ttk.Treeview(self.history_tab, columns=history_columns, show="headings", style="History.Treeview")
+        for column, title, width in (
+            ("generation", "GENERATION", 120),
+            ("fitness", "FITNESS", 150),
+            ("return", "RETURN", 150),
+            ("equity", "END CAPITAL", 170),
+            ("drawdown", "MAX DRAWDOWN", 150),
+            ("duration", "DURATION", 130),
+        ):
+            self.history_table.heading(column, text=title)
+            self.history_table.column(column, width=width, anchor=tk.E)
+        self.history_table.pack(fill=tk.BOTH, expand=True)
+
+        system_row = tk.Frame(self.system_tab, bg=self.palette["background"])
+        system_row.pack(fill=tk.X)
+        self.gpu_labels: dict[str, tk.Label] = {}
+        for key, title in (("device", "ACCELERATOR"), ("usage", "GPU UTILIZATION"), ("memory", "GPU MEMORY"), ("temperature", "TEMPERATURE")):
+            card = self._card(system_row)
+            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+            tk.Label(card, text=title, bg=self.palette["panel"], fg=self.palette["muted"], font=("Segoe UI", 9, "bold")).pack(anchor="w")
+            value = tk.Label(card, text="Indisponible", bg=self.palette["panel"], fg=self.palette["text"], font=("Segoe UI", 17, "bold"))
+            value.pack(anchor="w", pady=(12, 0))
+            self.gpu_labels[key] = value
+        tk.Label(self.system_tab, text="Training log", bg=self.palette["background"], fg=self.palette["text"], font=("Segoe UI", 11, "bold")).pack(anchor="w", pady=(24, 8))
+        self.log_text = tk.Text(self.system_tab, height=18, bg=self.palette["panel"], fg=self.palette["muted"], insertbackground=self.palette["text"], relief=tk.FLAT, font=("Consolas", 9), state=tk.DISABLED)
+        self.log_text.pack(fill=tk.BOTH, expand=True)
 
         self.root.after(200, self.process_events)
+        self.root.after(2500, self.refresh_gpu_telemetry)
+
+    def _card(self, parent: tk.Widget) -> tk.Frame:
+        return tk.Frame(
+            parent,
+            bg=self.palette["panel"],
+            padx=18,
+            pady=16,
+            highlightbackground=self.palette["border"],
+            highlightthickness=1,
+        )
+
+    def add_chart(self, series: str = "Fitness") -> None:
+        card = self._card(self.chart_content)
+        figure, axis = plt.subplots(figsize=(6.0, 3.2), dpi=100)
+        figure.patch.set_facecolor(self.palette["panel"])
+        axis.set_facecolor(self.palette["panel"])
+        axis.tick_params(colors=self.palette["muted"], labelsize=8)
+        axis.xaxis.label.set_color(self.palette["muted"])
+        axis.yaxis.label.set_color(self.palette["muted"])
+        for spine in axis.spines.values():
+            spine.set_color(self.palette["border"])
+        axis.grid(True, color=self.palette["border"], alpha=0.55, linewidth=0.7)
+        canvas = FigureCanvasTkAgg(figure, master=card)
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, pady=(5, 0))
+
+        controls = tk.Frame(card, bg=self.palette["panel"])
+        controls.pack(fill=tk.X)
+        selector = ttk.Combobox(
+            controls,
+            values=("Fitness", "Return", "End capital", "Max drawdown", "Turnover", "Generation duration"),
+            state="readonly",
+            width=24,
+        )
+        selector.set(series)
+        selector.pack(side=tk.LEFT)
+        ttk.Button(controls, text="×", width=3, command=lambda: self.remove_chart(chart)).pack(side=tk.RIGHT)
+        chart = {
+            "card": card,
+            "figure": figure,
+            "axis": axis,
+            "canvas": canvas,
+            "selector": selector,
+        }
+        self.charts.append(chart)
+        selector.bind("<<ComboboxSelected>>", lambda _event, item=chart: self.update_chart(item))
+        for widget in (card, controls, selector):
+            widget.bind("<ButtonPress-1>", lambda event, item=chart: self.begin_chart_drag(event, item))
+            widget.bind("<ButtonRelease-1>", lambda event, item=chart: self.finish_chart_drag(event, item))
+        self.layout_charts()
+        self.update_chart(chart)
+
+    def remove_chart(self, chart: dict) -> None:
+        if chart not in self.charts:
+            return
+        self.charts.remove(chart)
+        chart["figure"].clear()
+        chart["card"].destroy()
+        self.layout_charts()
+
+    def layout_charts(self) -> None:
+        for index, chart in enumerate(self.charts):
+            chart["card"].grid(
+                row=index // 2,
+                column=index % 2,
+                sticky="nsew",
+                padx=5,
+                pady=5,
+            )
+        self.chart_content.grid_columnconfigure(0, weight=1, minsize=350)
+        self.chart_content.grid_columnconfigure(1, weight=1, minsize=350)
+        for row in range((len(self.charts) + 1) // 2):
+            self.chart_content.grid_rowconfigure(row, weight=1)
+        self.update_chart_scrollregion()
+
+    def begin_chart_drag(self, event: tk.Event, chart: dict) -> None:
+        self.drag_chart = chart
+
+    def finish_chart_drag(self, event: tk.Event, chart: dict) -> None:
+        if getattr(self, "drag_chart", None) is not chart:
+            return
+        target = None
+        for candidate in self.charts:
+            if candidate is chart:
+                continue
+            left = candidate["card"].winfo_rootx()
+            top = candidate["card"].winfo_rooty()
+            right = left + candidate["card"].winfo_width()
+            bottom = top + candidate["card"].winfo_height()
+            if left <= event.x_root <= right and top <= event.y_root <= bottom:
+                target = candidate
+                break
+        if target is not None:
+            source_index = self.charts.index(chart)
+            target_index = self.charts.index(target)
+            self.charts[source_index], self.charts[target_index] = target, chart
+            self.layout_charts()
+        self.drag_chart = None
+
+    def resize_chart_area(self, event: tk.Event) -> None:
+        self.chart_canvas.itemconfigure(self.chart_window, width=event.width)
+
+    def update_chart_scrollregion(self, _event: tk.Event | None = None) -> None:
+        self.chart_canvas.configure(scrollregion=self.chart_canvas.bbox("all"))
+
+    def update_chart(self, chart: dict) -> None:
+        series = chart["selector"].get()
+        sources = {
+            "Fitness": (self.fitnesses, "Fitness", self.palette["blue"]),
+            "Return": (self.returns, "Return (%)", self.palette["green"]),
+            "End capital": (self.equities, "Capital ($)", self.palette["cyan"]),
+            "Max drawdown": (self.drawdowns, "Drawdown (%)", self.palette["red"]),
+            "Turnover": (self.turnovers, "Turnover", "#d5a6ff"),
+            "Generation duration": (self.generation_durations, "Duration (s)", "#f4bd67"),
+        }
+        values, ylabel, color = sources[series]
+        axis = chart["axis"]
+        axis.clear()
+        axis.set_facecolor(self.palette["panel"])
+        axis.tick_params(colors=self.palette["muted"], labelsize=8)
+        axis.grid(True, color=self.palette["border"], alpha=0.55, linewidth=0.7)
+        for spine in axis.spines.values():
+            spine.set_color(self.palette["border"])
+        axis.set_title(series, color=self.palette["text"], loc="left", fontsize=10, fontweight="bold", pad=10)
+        axis.set_xlabel("Generation", color=self.palette["muted"])
+        axis.set_ylabel(ylabel, color=self.palette["muted"])
+        axis.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=10))
+        axis.plot(self.generations[: len(values)], values, color=color, linewidth=2, marker="o", markersize=3)
+        chart["canvas"].draw_idle()
+
+    def update_all_charts(self) -> None:
+        for chart in self.charts:
+            self.update_chart(chart)
+
+    def refresh_gpu_telemetry(self) -> None:
+        if self.closed:
+            return
+        executable = shutil.which("nvidia-smi")
+        telemetry_found = False
+        if executable:
+            try:
+                result = subprocess.run(
+                    [
+                        executable,
+                        "--query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu",
+                        "--format=csv,noheader,nounits",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=2,
+                    check=True,
+                )
+                fields = [field.strip() for field in result.stdout.splitlines()[0].split(",")]
+                if len(fields) == 4:
+                    self.gpu_labels["usage"].config(text=f"{fields[0]} %")
+                    self.gpu_labels["memory"].config(text=f"{fields[1]} / {fields[2]} MiB")
+                    self.gpu_labels["temperature"].config(text=f"{fields[3]} °C")
+                    telemetry_found = True
+            except (OSError, subprocess.SubprocessError, IndexError):
+                pass
+        if not telemetry_found:
+            for device in Path("/sys/class/drm").glob("card[0-9]"):
+                device_path = device / "device"
+                usage_path = device_path / "gpu_busy_percent"
+                used_path = device_path / "mem_info_vram_used"
+                total_path = device_path / "mem_info_vram_total"
+                try:
+                    if usage_path.exists():
+                        usage = int(usage_path.read_text(encoding="ascii").strip())
+                        self.gpu_labels["usage"].config(text=f"{usage} %")
+                    if used_path.exists() and total_path.exists():
+                        used = int(used_path.read_text(encoding="ascii").strip())
+                        total = int(total_path.read_text(encoding="ascii").strip())
+                        self.gpu_labels["memory"].config(
+                            text=f"{used / 1024**2:,.0f} / {total / 1024**2:,.0f} MiB"
+                        )
+                    temperature_paths = sorted(
+                        (device_path / "hwmon").glob("hwmon*/temp*_input")
+                    )
+                    if temperature_paths:
+                        millidegrees = int(
+                            temperature_paths[0].read_text(encoding="ascii").strip()
+                        )
+                        self.gpu_labels["temperature"].config(
+                            text=f"{millidegrees / 1000:.0f} °C"
+                        )
+                    if usage_path.exists() or used_path.exists():
+                        break
+                except (OSError, ValueError):
+                    continue
+        self.root.after(2500, self.refresh_gpu_telemetry)
+
+    def append_log(self, line: str) -> None:
+        self.log_text.configure(state=tk.NORMAL)
+        self.log_text.insert(tk.END, line + "\n")
+        line_count = int(self.log_text.index("end-1c").split(".")[0])
+        if line_count > 500:
+            self.log_text.delete("1.0", f"{line_count - 500}.0")
+        self.log_text.see(tk.END)
+        self.log_text.configure(state=tk.DISABLED)
 
     def process_events(self) -> None:
         if self.closed:
@@ -867,6 +1114,12 @@ class TrainingGraph:
 
             if event_type == "generation":
                 self.handle_generation(payload)
+            elif event_type == "progress":
+                self.handle_progress(payload)
+            elif event_type == "system":
+                self.handle_system(payload)
+            elif event_type == "log":
+                self.append_log(payload["line"])
             elif event_type == "done":
                 self.handle_done(payload)
             elif event_type == "error":
@@ -877,132 +1130,140 @@ class TrainingGraph:
         elif processed:
             self.root.after(500, self.process_events)
 
+    def handle_progress(self, payload: dict) -> None:
+        percentage = float(payload["percentage"])
+        generation = payload.get("generation")
+        display_generation = generation + 1 if generation is not None else 0
+        self.progress_bar["value"] = percentage
+        generation_text = (
+            f"Generation {display_generation}"
+            if display_generation
+            else "Preparing"
+        )
+        if self.total_generations:
+            generation_text += f" / {self.total_generations}"
+        self.progress_label.config(text=f"{generation_text} · {percentage:.1f} %")
+
+        generation_eta_match = GENERATION_TIME_RE.search(
+            f"Generation time: {payload['eta']}"
+        )
+        generation_eta = 0.0
+        if generation_eta_match:
+            generation_eta = (
+                3600 * float(generation_eta_match.group("hours") or 0)
+                + 60 * float(generation_eta_match.group("minutes") or 0)
+                + float(generation_eta_match.group("seconds"))
+            )
+        average_duration = (
+            sum(self.generation_durations) / len(self.generation_durations)
+            if self.generation_durations
+            else 0.0
+        )
+        remaining_generations = max(
+            0,
+            self.total_generations - display_generation,
+        )
+        total_eta = generation_eta + average_duration * remaining_generations
+        eta_text = self.format_duration(total_eta) if total_eta else payload["eta"]
+        self.speed_label.config(
+            text=(
+                f"{payload['rate']:,.2f} bars/s  ·  "
+                f"Generation ETA {payload['eta']}  ·  Total ETA {eta_text}"
+            )
+        )
+        self.activity_label.config(
+            text=(
+                f"{generation_text}\n"
+                f"{payload['completed']:,} / {payload['total']:,} bars processed\n"
+                f"Current speed: {payload['rate']:,.2f} bars/s\n"
+                f"Estimated time remaining: {eta_text}"
+            )
+        )
+
+    def handle_system(self, payload: dict) -> None:
+        if "total_generations" in payload:
+            self.total_generations = payload["total_generations"]
+        line = payload.get("line", "")
+        if line.startswith("GPU:"):
+            self.gpu_labels["device"].config(text=line.partition(":")[2].strip())
+        elif line.startswith("GPU memory:"):
+            self.gpu_labels["memory"].config(text=line.partition(":")[2].strip())
+        elif line.startswith("Accelerated population evaluation:"):
+            self.gpu_labels["device"].config(text=line.partition(":")[2].strip())
+        elif line == "Using CPU reference evaluation.":
+            self.gpu_labels["device"].config(text="CPU")
+
+    @staticmethod
+    def format_duration(seconds: float) -> str:
+        remaining = max(0, int(seconds))
+        hours, remainder = divmod(remaining, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        if hours:
+            return f"{hours}h {minutes:02d}m"
+        if minutes:
+            return f"{minutes}m {seconds:02d}s"
+        return f"{seconds}s"
+
     def handle_generation(self, payload: dict) -> None:
         metrics = payload["metrics"]
-
         generation = int(metrics["generation"])
         return_percent = float(metrics["return_percent"])
-
         fitness = metrics["best_fitness"]
         final_equity = metrics["final_equity"]
-
         self.generations.append(generation)
         self.returns.append(return_percent)
-        self.fitnesses.append(
-            float(fitness) if fitness is not None else float("nan")
-        )
-        self.equities.append(
-            float(final_equity)
-            if final_equity is not None
-            else float("nan")
-        )
+        duration = metrics.get("generation_time_seconds")
+        self.fitnesses.append(float(fitness) if fitness is not None else float("nan"))
+        self.equities.append(float(final_equity) if final_equity is not None else float("nan"))
         drawdown = metrics.get("max_drawdown_percent")
         turnover = metrics.get("turnover")
         self.drawdowns.append(float(drawdown) if drawdown is not None else float("nan"))
         self.turnovers.append(float(turnover) if turnover is not None else float("nan"))
+        self.generation_durations.append(float(duration) if duration is not None else float("nan"))
 
-        # Return
-        self.return_line.set_data(self.generations, self.returns)
-        self.axis_return.relim()
-        self.axis_return.autoscale_view()
-
-        # Fitness
-        self.fitness_line.set_data(
-            self.generations,
-            self.fitnesses,
-        )
-        self.axis_fitness.relim()
-        self.axis_fitness.autoscale_view()
-
-        # Equity
-        self.equity_line.set_data(
-            self.generations,
-            self.equities,
-        )
-        self.axis_equity.relim()
-        self.axis_equity.autoscale_view()
-
-        self.drawdown_line.set_data(self.generations, self.drawdowns)
-        self.axis_risk.relim()
-        self.axis_risk.autoscale_view()
-        self.turnover_line.set_data(self.generations, self.turnovers)
-        self.axis_turnover.relim()
-        self.axis_turnover.autoscale_view()
-
-        self.axis_return.xaxis.set_major_locator(
-            MaxNLocator(integer=True, nbins=15)
-        )
-        self.axis_fitness.xaxis.set_major_locator(
-            MaxNLocator(integer=True, nbins=15)
-        )
-        self.axis_equity.xaxis.set_major_locator(
-            MaxNLocator(integer=True, nbins=15)
-        )
-        self.axis_risk.xaxis.set_major_locator(
-            MaxNLocator(integer=True, nbins=15)
-        )
-
-        fitness_text = (
-            "n/a"
-            if fitness is None
-            else f"{float(fitness):.6f}"
-        )
-
-        equity_text = (
-            "n/a"
-            if final_equity is None
-            else f"${float(final_equity):,.2f}"
-        )
-
-        self.status_label.config(
-            text=(
-                "Training in progress — "
-                f"Generation {generation}"
-            )
-        )
-
+        fitness_text = "—" if fitness is None else f"{float(fitness):.6f}"
+        equity_text = "—" if final_equity is None else f"${float(final_equity):,.2f}"
+        drawdown_text = "—" if drawdown is None else f"{float(drawdown):.2f}%"
+        self.kpi_values["fitness"].config(text=fitness_text)
+        self.kpi_values["return"].config(text=f"{return_percent:+.2f}%")
+        self.kpi_values["equity"].config(text=equity_text)
+        self.kpi_values["drawdown"].config(text=drawdown_text)
+        self.status_label.config(text=f"Training · generation {generation}")
         self.latest_label.config(
-            text=(
-                f"Return: {return_percent:+.4f}%   |   "
-                f"Fitness: {fitness_text}   |   "
-                f"Equity: {equity_text}"
-            )
+            text=f"Return {return_percent:+.2f}%   ·   Fitness {fitness_text}   ·   Capital {equity_text}"
         )
-
         self.metrics_label.config(
+            text=f"Generation {generation} completed · max drawdown {drawdown_text} · turnover {turnover if turnover is not None else '—'}"
+        )
+        self.progress_bar["value"] = 100
+        self.progress_label.config(text=f"Generation {generation} · 100%")
+        self.history_table.insert(
+            "",
+            tk.END,
+            values=(
+                generation,
+                fitness_text,
+                f"{return_percent:+.2f}%",
+                equity_text,
+                drawdown_text,
+                self.format_duration(float(duration)) if duration is not None else "—",
+            ),
+        )
+        self.update_all_charts()
+        self.activity_label.config(
             text=(
-                f"Generation {generation}   |   "
-                f"Fitness: {fitness_text}   |   "
-                f"Final equity: {equity_text}"
+                f"Latest completed generation: {generation}\n"
+                f"Fitness {fitness_text} · return {return_percent:+.2f}%\n"
+                f"End capital {equity_text} · max drawdown {drawdown_text}"
             )
         )
-
-        self.canvas_return.draw_idle()
-        self.canvas_fitness.draw_idle()
-        self.canvas_equity.draw_idle()
-        self.canvas_risk.draw_idle()
-
-        # Save the live dashboard plots.
-        self.figure_return.savefig(
-            self.run_dir / "return_curve.png",
-            dpi=120,
-            bbox_inches="tight",
-        )
-        self.figure_fitness.savefig(
-            self.run_dir / "fitness_curve.png",
-            dpi=120,
-            bbox_inches="tight",
-        )
-        self.figure_equity.savefig(
-            self.run_dir / "equity_curve.png",
-            dpi=120,
-            bbox_inches="tight",
-        )
-        self.figure_risk.savefig(
-            self.run_dir / "risk_turnover_curve.png",
-            dpi=120,
-            bbox_inches="tight",
-        )
+        for index, chart in enumerate(self.charts, start=1):
+            chart["figure"].savefig(
+                self.run_dir / f"chart_{index:02d}.png",
+                dpi=120,
+                bbox_inches="tight",
+                facecolor=chart["figure"].get_facecolor(),
+            )
 
     def handle_done(self, payload: dict) -> None:
         self.training_finished = True
@@ -1010,41 +1271,15 @@ class TrainingGraph:
 
         if return_code == 0:
             self.status_label.config(
-                text=(
-                    "Training complete — "
-                    f"{len(self.generations)} generations recorded"
-                )
+                text=f"Training complete · {len(self.generations)} generations"
             )
-
-            if self.returns:
-                final_return = self.returns[-1]
-                final_fitness = self.fitnesses[-1]
-                final_equity = self.equities[-1]
-
-                self.latest_label.config(
-                    text=(
-                        f"Final return: {final_return:+.4f}%   |   "
-                        f"Fitness: {final_fitness:.6f}   |   "
-                        f"Equity: ${final_equity:,.2f}"
-                    )
-                )
-
-                self.metrics_label.config(
-                    text=(
-                        f"Final generation: {self.generations[-1]}   |   "
-                        f"Fitness: {final_fitness:.6f}   |   "
-                        f"Final equity: ${final_equity:,.2f}"
-                    )
-                )
+            self.progress_bar["value"] = 100
+            self.progress_label.config(text="Training complete")
+            self.speed_label.config(text="All generations have completed")
         else:
-            message = f"Training failed — exit code {return_code}"
+            message = f"Training failed · exit code {return_code}"
             self.status_label.config(text=message)
             self.metrics_label.config(text=message)
-
-        self.canvas_return.draw_idle()
-        self.canvas_fitness.draw_idle()
-        self.canvas_equity.draw_idle()
-        self.canvas_risk.draw_idle()
 
     def handle_error(self, payload: dict) -> None:
         self.training_finished = True

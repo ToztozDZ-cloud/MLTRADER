@@ -512,6 +512,7 @@ class AgentEvaluator:
         agents: Sequence[Agent],
         episodes: Sequence[pd.DataFrame],
         start_step: int | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[list[EvaluationResult]]:
         if not agents:
             return [[] for _ in episodes]
@@ -578,6 +579,7 @@ class AgentEvaluator:
             force_flatten=flatten_tensor,
             compiled=compiled,
             start_step=start_step,
+            progress_callback=progress_callback,
         )
 
         return [
@@ -1557,6 +1559,7 @@ class AgentEvaluator:
         force_flatten: torch.Tensor,
         compiled: dict,
         start_step: int,
+        progress_callback: Callable[[int, int], None] | None = None,
     ) -> list[EvaluationResult]:
         population_size = len(
             agents
@@ -1812,6 +1815,8 @@ class AgentEvaluator:
                     rate=rate,
                     eta=eta,
                 )
+                if progress_callback is not None:
+                    progress_callback(completed, steps)
 
         self._synchronize_device()
 
