@@ -1,21 +1,37 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
-from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from dotenv import load_dotenv
 
 from environment.data import validate_ohlcv
+from trading.config import resolve_market_data_feed
 
 
 DEFAULT_SYMBOLS = ("SPY", "QQQ", "AAPL", "MSFT")
+
+
+def normalize_symbols(symbols: list[str]) -> list[str]:
+    return list(
+        dict.fromkeys(symbol.strip().upper() for symbol in symbols if symbol.strip())
+    )
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def main() -> int:
@@ -29,8 +45,8 @@ def main() -> int:
     parser.add_argument(
         "--feed",
         choices=("iex", "sip"),
-        default="iex",
-        help="IEX is generally available on basic plans; SIP may require a subscription.",
+        default=None,
+        help="Override the feed in config/live.yaml (IEX is generally available; SIP may require a subscription).",
     )
     args = parser.parse_args()
 
@@ -56,30 +72,84 @@ def main() -> int:
     if start >= end:
         parser.error("--start must be earlier than --end")
 
+    symbols = normalize_symbols(args.symbols)
+    if not symbols:
+        parser.error("--symbols must contain at least one non-empty symbol.")
+
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     client = StockHistoricalDataClient(key, secret)
-    feed = DataFeed.IEX if args.feed == "iex" else DataFeed.SIP
+    feed_name, feed = resolve_market_data_feed(args.feed)
 
     request = StockBarsRequest(
-        symbol_or_symbols=[s.upper() for s in args.symbols],
+        symbol_or_symbols=symbols,
         timeframe=TimeFrame(5, TimeFrameUnit.Minute),
         start=start,
         end=end,
         feed=feed,
         adjustment="raw",
     )
-    bars = client.get_stock_bars(request).df
+    report = {
+        "provider": "alpaca",
+        "feed": feed_name,
+        "timeframe": "5m",
+        "adjustment": "raw",
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "datasets": [],
+        "failures": [],
+    }
+
+    def save_report() -> Path:
+        report_path = output_dir / "market_data_manifest.json"
+        report_path.write_text(
+            json.dumps(report, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return report_path
+
+    try:
+        bars = client.get_stock_bars(request).df
+    except Exception as exc:
+        report["failures"].extend(
+            {
+                "symbol": symbol,
+                "error_type": type(exc).__name__,
+                "message": str(exc),
+            }
+            for symbol in symbols
+        )
+        manifest_path = save_report()
+        print(f"Market-data manifest: {manifest_path.resolve()}")
+        print(f"Market-data report: {json.dumps(report, sort_keys=True)}")
+        return 1
+
     if bars.empty:
-        print("Alpaca returned no bars. Check credentials, date range, feed access, and symbols.")
+        report["failures"].extend(
+            {
+                "symbol": symbol,
+                "error_type": "NoDataReturned",
+                "message": "Alpaca returned no bars for this symbol.",
+            }
+            for symbol in symbols
+        )
+        manifest_path = save_report()
+        print(f"Market-data manifest: {manifest_path.resolve()}")
+        print(f"Market-data failures: {json.dumps(report['failures'], sort_keys=True)}")
         return 1
 
     written = 0
-    for symbol in [s.upper() for s in args.symbols]:
+    for symbol in symbols:
         try:
             frame = bars.xs(symbol, level="symbol").reset_index()
         except (KeyError, ValueError):
-            print(f"{symbol}: no bars returned; skipped")
+            report["failures"].append(
+                {
+                    "symbol": symbol,
+                    "error_type": "NoDataReturned",
+                    "message": "Alpaca returned no bars for this symbol.",
+                }
+            )
             continue
 
         completed_cutoff = min(
@@ -98,20 +168,46 @@ def main() -> int:
                 require_timestamp=True,
             )
         except ValueError as exc:
-            print(f"{symbol}: invalid downloaded bars; skipped: {exc}")
+            report["failures"].append(
+                {
+                    "symbol": symbol,
+                    "error_type": "InvalidBars",
+                    "message": str(exc),
+                }
+            )
             continue
         if frame.empty:
-            print(f"{symbol}: no completed regular-session bars; skipped")
+            report["failures"].append(
+                {
+                    "symbol": symbol,
+                    "error_type": "NoCompletedBars",
+                    "message": "No completed regular-session bars were returned.",
+                }
+            )
             continue
         frame["timestamp"] = frame["timestamp"].dt.strftime(
             "%Y-%m-%dT%H:%M:%SZ"
         )
         path = output_dir / f"{symbol}_5m.csv"
         frame.to_csv(path, index=False)
+        digest = file_sha256(path)
+        report["datasets"].append(
+            {
+                "symbol": symbol,
+                "path": path.name,
+                "bars": len(frame),
+                "sha256": digest,
+                "identity": f"alpaca:{feed_name}:{symbol}:5m:{digest}",
+            }
+        )
         print(f"{symbol}: saved {len(frame):,} bars -> {path}")
         written += 1
 
+    manifest_path = save_report()
     print(f"Done. Wrote {written} CSV file(s) to {output_dir.resolve()}")
+    print(f"Market-data manifest: {manifest_path.resolve()}")
+    if report["failures"]:
+        print(f"Market-data failures: {json.dumps(report['failures'], sort_keys=True)}")
     return 0 if written else 1
 
 

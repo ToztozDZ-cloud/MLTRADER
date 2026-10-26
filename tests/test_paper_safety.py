@@ -256,6 +256,47 @@ def _broker() -> PaperBroker:
     return broker
 
 
+def test_successful_submission_records_expected_owned_quantity(tmp_path) -> None:
+    trader = PaperTrader.__new__(PaperTrader)
+    trader.broker = SimpleNamespace(
+        clock=lambda: SimpleNamespace(
+            is_open=True,
+            next_close=pd.Timestamp.now(tz="UTC").to_pydatetime()
+            + timedelta(hours=1),
+        ),
+        account=lambda: SimpleNamespace(equity=10_000.0),
+        positions=lambda: [],
+        open_order_symbols=lambda: set(),
+        submit_delta=lambda *args, **kwargs: SimpleNamespace(
+            id="bot-order", qty=1.5, side=SimpleNamespace(value="buy")
+        ),
+    )
+    trader._enforce_daily_loss_stop = lambda _account: False
+    trader.flatten_before_close_minutes = 10
+    trader.step_count = 0
+    trader.scan_interval_steps = 99
+    trader._discover_symbols = lambda force=False: None
+    stamp = pd.Timestamp.now(tz="UTC")
+    trader._scan = lambda: {
+        "AAA": (0.15, 100.0, pd.DataFrame(index=[stamp]), 0.5)
+    }
+    trader.last_bar_time = {}
+    trader.last_prices = {}
+    trader.last_signals = {}
+    trader.max_position_fraction = 0.1
+    trader.max_gross_exposure = 0.2
+    trader.max_positions = 2
+    trader.allow_short = False
+    trader.owned_positions = {}
+    trader.ownership_state_path = tmp_path / "ownership.json"
+    trader.logger = SimpleNamespace(log=lambda **kwargs: None)
+
+    trader.step()
+
+    assert trader.owned_positions == {"AAA": 1.5}
+    assert '"AAA": 1.5' in trader.ownership_state_path.read_text()
+
+
 def test_broker_enforces_exposure_and_emits_paper_idempotency_key() -> None:
     broker = _broker()
     with pytest.raises(RuntimeError, match="per-symbol exposure"):

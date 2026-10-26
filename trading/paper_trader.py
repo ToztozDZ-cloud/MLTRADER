@@ -18,7 +18,7 @@ from trading.config import (
     DECISION_INTERVAL_SECONDS, LOG_PATH, LOOKBACK, MODEL_PATH, TIMEFRAME_MINUTES,
     load_universe_config,
 )
-from trading.market_data import MarketData
+from trading.market_data import MarketData, MarketDataBatchResult
 from trading.trade_logger import TradeLogger
 
 FEATURE_COUNT = ObservationBuilder.input_size(LOOKBACK)
@@ -176,9 +176,19 @@ class PaperTrader:
 
     def _scan(self) -> dict[str, tuple[float, float, pd.DataFrame, float]]:
         self._discover_symbols()
-        bars_by_symbol = self.market.get_recent_bars_batched(
+        market_data_result = self.market.get_recent_bars_batched(
             self.symbols, limit=LOOKBACK, batch_size=self.batch_size
         )
+        if isinstance(market_data_result, MarketDataBatchResult):
+            bars_by_symbol = market_data_result.bars
+            for failure in market_data_result.failures:
+                print(
+                    f"Market-data batch {failure.batch_number} failed "
+                    f"for {', '.join(failure.symbols)} "
+                    f"({failure.error_type}): {failure.message}"
+                )
+        else:
+            bars_by_symbol = market_data_result
         if not bars_by_symbol:
             raise RuntimeError("No recent bars received for the configured universe.")
 

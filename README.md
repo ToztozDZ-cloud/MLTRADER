@@ -38,7 +38,7 @@ Download completed five-minute bars from Alpaca's historical data API:
 python download_market_data.py --symbols SPY QQQ --start 2024-01-01 --output-dir data/raw
 ```
 
-The downloader validates each symbol through the shared OHLCV pipeline, keeps regular-session bars, and excludes the currently forming candle. It downloads market data only; it does not submit orders.
+The shared Alpaca feed is configured by `paper.market_data.feed` in `config/live.yaml` (`iex` by default; `sip` may require a subscription). The downloader uses this setting; an explicit `--feed` can override it for a download. Each run writes `market_data_manifest.json` with provider, feed, symbol, timeframe, failures, and a SHA-256 dataset identity. Duplicate symbols are normalized and downloaded once. The downloader validates each symbol through the shared OHLCV pipeline, keeps regular-session bars, and excludes the currently forming candle. It downloads market data only; it does not submit orders.
 
 ## Training
 

@@ -7,5 +7,6 @@ paper:
     endpoint: paper
 
   market_data:
+    feed: iex
     timeframe: 5m
     lookback: 64

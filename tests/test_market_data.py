@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+import json
+import sys
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
+import download_market_data
+from download_market_data import normalize_symbols
 from environment.data import load_ohlcv_csv, validate_ohlcv
+from trading.config import resolve_market_data_feed
+from trading.market_data import MarketData, MarketDataBatchResult
 
 
 def _bars(timestamps, *, symbols=None) -> pd.DataFrame:
@@ -119,3 +127,124 @@ def test_csv_loader_uses_filename_as_symbol_identity(tmp_path) -> None:
     _bars(stamps).to_csv(path, index=False)
     result = load_ohlcv_csv(path, timezone="America/New_York", timeframe="5m")
     assert set(result["symbol"]) == {"SPY_5M"}
+
+
+def test_feed_selection_uses_shared_config_and_supports_override() -> None:
+    name, configured_feed = resolve_market_data_feed()
+    assert name == "iex"
+    assert configured_feed.value == "iex"
+
+    name, override_feed = resolve_market_data_feed("SIP")
+    assert name == "sip"
+    assert override_feed.value == "sip"
+
+    with pytest.raises(ValueError, match="Unsupported Alpaca market-data feed"):
+        resolve_market_data_feed("invalid")
+
+
+def test_downloader_normalizes_and_deduplicates_symbols() -> None:
+    assert normalize_symbols(["spy", " SPY ", "qqq", ""]) == ["SPY", "QQQ"]
+
+
+def test_downloader_records_feed_identity_and_partial_symbol_failures(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    stamps = pd.to_datetime(
+        ["2024-01-02 14:30", "2024-01-02 14:35"], utc=True
+    )
+    index = pd.MultiIndex.from_arrays(
+        [["AAA", "AAA"], stamps], names=["symbol", "timestamp"]
+    )
+    bars = pd.DataFrame(
+        {
+            "open": [100.0, 100.0],
+            "high": [101.0, 101.0],
+            "low": [99.0, 99.0],
+            "close": [100.0, 100.0],
+            "volume": [1000.0, 1000.0],
+        },
+        index=index,
+    )
+    requested_symbols = []
+
+    class FakeClient:
+        def __init__(self, key, secret):
+            pass
+
+        def get_stock_bars(self, request):
+            return SimpleNamespace(df=bars)
+
+    monkeypatch.setenv("APCA_API_KEY_ID", "test-key")
+    monkeypatch.setenv("APCA_API_SECRET_KEY", "test-secret")
+    monkeypatch.setattr(download_market_data, "load_dotenv", lambda: None)
+    monkeypatch.setattr(download_market_data, "StockHistoricalDataClient", FakeClient)
+
+    def create_request(**kwargs):
+        requested_symbols.extend(kwargs["symbol_or_symbols"])
+        return kwargs
+
+    monkeypatch.setattr(download_market_data, "StockBarsRequest", create_request)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "download_market_data.py",
+            "--symbols",
+            "aaa",
+            "AAA",
+            "MISSING",
+            "--start",
+            "2024-01-02",
+            "--end",
+            "2024-01-03",
+            "--output-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert download_market_data.main() == 0
+
+    report = json.loads((tmp_path / "market_data_manifest.json").read_text())
+    assert requested_symbols == ["AAA", "MISSING"]
+    assert report["provider"] == "alpaca"
+    assert report["feed"] == "iex"
+    assert report["datasets"][0]["symbol"] == "AAA"
+    assert len(report["datasets"][0]["sha256"]) == 64
+    assert report["datasets"][0]["identity"].startswith("alpaca:iex:AAA:5m:")
+    assert report["failures"] == [
+        {
+            "symbol": "MISSING",
+            "error_type": "NoDataReturned",
+            "message": "Alpaca returned no bars for this symbol.",
+        }
+    ]
+    assert "Market-data manifest:" in capsys.readouterr().out
+
+
+def test_batched_market_data_deduplicates_and_reports_failures() -> None:
+    market = MarketData.__new__(MarketData)
+    market.feed_name = "iex"
+    calls = []
+
+    def get_recent_bars(symbols, limit):
+        calls.append(symbols)
+        if symbols == ["CCC"]:
+            raise TimeoutError("request timed out")
+        return {"AAA": _bars(pd.to_datetime(["2024-01-02"], utc=True))}
+
+    market.get_recent_bars = get_recent_bars
+    result = market.get_recent_bars_batched(
+        ["aaa", "AAA", "BBB", "CCC"], batch_size=2
+    )
+
+    assert isinstance(result, MarketDataBatchResult)
+    assert calls == [["AAA", "BBB"], ["CCC"]]
+    assert set(result.bars) == {"AAA"}
+    assert len(result.data_identity["AAA"]) == 64
+    assert [
+        (failure.batch_number, failure.symbols, failure.error_type)
+        for failure in result.failures
+    ] == [
+        (1, ("BBB",), "NoDataReturned"),
+        (2, ("CCC",), "TimeoutError"),
+    ]

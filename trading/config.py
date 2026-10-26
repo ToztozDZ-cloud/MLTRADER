@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from alpaca.data.enums import DataFeed
 import yaml
 from dotenv import load_dotenv
 
@@ -21,6 +22,29 @@ PAPER_RUNTIME_CONFIG_PATH = PROJECT_ROOT / "config" / "live.yaml"
 MODEL_PATH = str(PROJECT_ROOT / "models" / "champions" / "best_agent.json")
 LOG_PATH = str(PROJECT_ROOT / "logs" / "paper_trades.csv")
 
+MARKET_DATA_FEEDS = {
+    "iex": DataFeed.IEX,
+    "sip": DataFeed.SIP,
+}
+
+
+def resolve_market_data_feed(feed: str | None = None) -> tuple[str, DataFeed]:
+    """Resolve an optional override against the shared paper market-data setting."""
+    configured_feed = (
+        feed
+        if feed is not None
+        else PAPER_RUNTIME_CONFIG["market_data"].get("feed", "iex")
+    )
+    name = str(configured_feed).strip().lower()
+    try:
+        return name, MARKET_DATA_FEEDS[name]
+    except KeyError as exc:
+        supported = ", ".join(MARKET_DATA_FEEDS)
+        raise ValueError(
+            f"Unsupported Alpaca market-data feed {configured_feed!r}; use {supported}."
+        ) from exc
+
+
 def validate_paper_runtime_config(config: dict) -> dict:
     if not isinstance(config, dict) or not isinstance(config.get("paper"), dict):
         raise ValueError(f"Invalid paper runtime config: {PAPER_RUNTIME_CONFIG_PATH}")
@@ -38,6 +62,7 @@ def validate_paper_runtime_config(config: dict) -> dict:
         raise ValueError("Paper market-data timeframe must be positive.")
     if int(market_data.get("lookback", 0)) <= 0:
         raise ValueError("Paper market-data lookback must be positive.")
+    resolve_market_data_feed(str(market_data.get("feed", "iex")))
     return settings
 
 

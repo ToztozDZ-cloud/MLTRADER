@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -8,7 +10,29 @@ from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from environment.data import validate_ohlcv
-from trading.config import LOOKBACK, TIMEFRAME_MINUTES, require_paper_credentials
+from trading.config import (
+    LOOKBACK,
+    TIMEFRAME_MINUTES,
+    require_paper_credentials,
+    resolve_market_data_feed,
+)
+
+
+@dataclass(frozen=True)
+class MarketDataBatchFailure:
+    batch_number: int
+    symbols: tuple[str, ...]
+    error_type: str
+    message: str
+
+
+@dataclass
+class MarketDataBatchResult:
+    bars: dict[str, pd.DataFrame]
+    provider: str
+    feed: str
+    data_identity: dict[str, str]
+    failures: list[MarketDataBatchFailure]
 
 
 class MarketData:
@@ -17,13 +41,17 @@ class MarketData:
     def __init__(self) -> None:
         api_key, api_secret = require_paper_credentials()
         self.client = StockHistoricalDataClient(api_key, api_secret)
+        self.feed_name, self.feed = resolve_market_data_feed()
 
     @staticmethod
     def _timeframe():
         return TimeFrame(TIMEFRAME_MINUTES, TimeFrameUnit.Minute)
 
     def get_recent_bars(self, symbols: str | list[str], limit: int = LOOKBACK):
-        symbol_list = [symbols] if isinstance(symbols, str) else list(dict.fromkeys(symbols))
+        requested_symbols = [symbols] if isinstance(symbols, str) else symbols
+        symbol_list = list(
+            dict.fromkeys(str(symbol).strip().upper() for symbol in requested_symbols)
+        )
         if not symbol_list:
             return {}
 
@@ -37,7 +65,7 @@ class MarketData:
             start=start,
             end=end,
             limit=min(10000, max(int(limit), int(limit) * len(symbol_list))),
-            feed="iex",
+            feed=self.feed,
         )
         response = self.client.get_stock_bars(request)
         frame = response.df
@@ -83,13 +111,51 @@ class MarketData:
 
     def get_recent_bars_batched(
         self, symbols: list[str], limit: int = LOOKBACK, batch_size: int = 50
-    ) -> dict[str, pd.DataFrame]:
-        result: dict[str, pd.DataFrame] = {}
+    ) -> MarketDataBatchResult:
+        unique_symbols = list(
+            dict.fromkeys(str(symbol).strip().upper() for symbol in symbols)
+        )
+        bars_by_symbol: dict[str, pd.DataFrame] = {}
+        failures: list[MarketDataBatchFailure] = []
         batch_size = max(1, min(int(batch_size), 100))
-        for offset in range(0, len(symbols), batch_size):
-            batch = symbols[offset:offset + batch_size]
+        for offset in range(0, len(unique_symbols), batch_size):
+            batch = unique_symbols[offset:offset + batch_size]
+            batch_number = offset // batch_size + 1
             try:
-                result.update(self.get_recent_bars(batch, limit=limit))
+                batch_bars = self.get_recent_bars(batch, limit=limit)
             except Exception as exc:
-                print(f"Market-data batch {offset // batch_size + 1} failed: {exc}")
-        return result
+                failures.append(
+                    MarketDataBatchFailure(
+                        batch_number=batch_number,
+                        symbols=tuple(batch),
+                        error_type=type(exc).__name__,
+                        message=str(exc),
+                    )
+                )
+                continue
+
+            bars_by_symbol.update(batch_bars)
+            for symbol in batch:
+                if symbol not in batch_bars:
+                    failures.append(
+                        MarketDataBatchFailure(
+                            batch_number=batch_number,
+                            symbols=(symbol,),
+                            error_type="NoDataReturned",
+                            message="Alpaca returned no completed bars for this symbol.",
+                        )
+                    )
+
+        identities = {
+            symbol: hashlib.sha256(
+                pd.util.hash_pandas_object(frame, index=True).values.tobytes()
+            ).hexdigest()
+            for symbol, frame in bars_by_symbol.items()
+        }
+        return MarketDataBatchResult(
+            bars=bars_by_symbol,
+            provider="alpaca",
+            feed=self.feed_name,
+            data_identity=identities,
+            failures=failures,
+        )
