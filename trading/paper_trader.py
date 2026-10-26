@@ -57,6 +57,11 @@ class PaperTrader:
         self.daily_loss_stop_triggered = False
         self.risk_state_path = Path(LOG_PATH).with_name("paper_risk_state.json")
         self._load_risk_state()
+        self.ownership_state_path = Path(LOG_PATH).with_name(
+            "paper_position_ownership.json"
+        )
+        self.owned_positions: dict[str, float] = {}
+        self._load_ownership_state()
 
         print(f"Loading trained agent from {MODEL_PATH}...")
         self.agent = AgentSerializer.load(
@@ -180,9 +185,13 @@ class PaperTrader:
         account = self.broker.account()
         positions = {p.symbol: p for p in self.broker.positions()}
         pending_symbols = self.broker.open_order_symbols()
+        self._reconcile_owned_positions(positions, pending_symbols)
         candidates = []
         for symbol, raw_frame in bars_by_symbol.items():
             if symbol in pending_symbols:
+                continue
+            if symbol in positions and symbol not in self.owned_positions:
+                print(f"SKIP {symbol}: position ownership is unknown.")
                 continue
             if not self._bars_are_fresh(raw_frame):
                 print(f"SKIP {symbol}: latest completed bar is stale.")
@@ -221,7 +230,8 @@ class PaperTrader:
             abs(float(position.market_value)) / max(equity, 1.0)
             for symbol, position in positions.items()
             if (
-                symbol not in bars_by_symbol
+                symbol not in self.owned_positions
+                or symbol not in bars_by_symbol
                 or symbol in pending_symbols
                 or not self._bars_are_fresh(bars_by_symbol[symbol])
             )
@@ -250,7 +260,12 @@ class PaperTrader:
         # Flatten existing positions which are no longer selected. Avoid changing
         # any position for which fresh data was unavailable; that avoids blind orders.
         for symbol, position in positions.items():
-            if symbol not in desired and symbol in bars_by_symbol and symbol not in pending_symbols:
+            if (
+                symbol in self.owned_positions
+                and symbol not in desired
+                and symbol in bars_by_symbol
+                and symbol not in pending_symbols
+            ):
                 raw_frame = bars_by_symbol[symbol]
                 if not self._bars_are_fresh(raw_frame):
                     continue
@@ -299,6 +314,105 @@ class PaperTrader:
         temporary.write_text(json.dumps(state, indent=2, allow_nan=False), encoding="utf-8")
         temporary.replace(self.risk_state_path)
 
+    def _load_ownership_state(self) -> None:
+        try:
+            state = json.loads(
+                self.ownership_state_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(state, dict) or state.get("version") != 1:
+                raise ValueError("unsupported ownership state format")
+            positions = state.get("positions")
+            if not isinstance(positions, dict):
+                raise ValueError("ownership positions must be an object")
+            owned_positions = {}
+            for symbol, quantity in positions.items():
+                if (
+                    not isinstance(symbol, str)
+                    or not symbol
+                    or symbol != symbol.strip().upper()
+                ):
+                    raise ValueError("ownership symbols must be non-empty uppercase strings")
+                expected_quantity = float(quantity)
+                if not math.isfinite(expected_quantity):
+                    raise ValueError(f"invalid owned quantity for {symbol}")
+                owned_positions[symbol] = expected_quantity
+            self.owned_positions = owned_positions
+        except FileNotFoundError:
+            self.owned_positions = {}
+        except (OSError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "Could not load paper position ownership state; refusing to trade: "
+                f"{exc}"
+            ) from exc
+
+    def _save_ownership_state(self) -> None:
+        self.ownership_state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = {"version": 1, "positions": self.owned_positions}
+        temporary = self.ownership_state_path.with_suffix(".tmp")
+        temporary.write_text(
+            json.dumps(state, indent=2, allow_nan=False),
+            encoding="utf-8",
+        )
+        temporary.replace(self.ownership_state_path)
+
+    @staticmethod
+    def _position_quantity(position) -> float:
+        quantity = float(position.qty)
+        if not math.isfinite(quantity):
+            raise RuntimeError("Broker position quantity is invalid")
+        return quantity
+
+    @staticmethod
+    def _quantity_matches(expected: float, actual: float) -> bool:
+        return math.isclose(expected, actual, rel_tol=1e-6, abs_tol=1e-4)
+
+    def _reconcile_owned_positions(
+        self,
+        positions: dict,
+        pending_symbols: set[str],
+    ) -> None:
+        changed = False
+        for symbol, expected_quantity in list(self.owned_positions.items()):
+            if symbol in pending_symbols:
+                continue
+            position = positions.get(symbol)
+            actual_quantity = (
+                self._position_quantity(position) if position is not None else 0.0
+            )
+            if self._quantity_matches(expected_quantity, actual_quantity):
+                continue
+            print(
+                f"OWNERSHIP REVOKED {symbol}: expected {expected_quantity:g} shares, "
+                f"broker reports {actual_quantity:g}; leaving position untouched."
+            )
+            del self.owned_positions[symbol]
+            changed = True
+        if changed:
+            self._save_ownership_state()
+
+    def _close_owned_positions(self) -> None:
+        self.broker.cancel_owned_open_orders()
+        pending_symbols = self.broker.open_order_symbols()
+        positions = {position.symbol: position for position in self.broker.positions()}
+        self._reconcile_owned_positions(positions, pending_symbols)
+
+        for symbol, expected_quantity in list(self.owned_positions.items()):
+            position = positions.get(symbol)
+            if position is None or symbol in pending_symbols:
+                continue
+            actual_quantity = self._position_quantity(position)
+            if not self._quantity_matches(expected_quantity, actual_quantity):
+                continue
+            try:
+                order = self.broker.close_position(symbol)
+            except Exception as exc:
+                print(f"CLOSE FAILED {symbol}: {exc}")
+                continue
+            if order is not None:
+                self.owned_positions[symbol] = 0.0
+                self._save_ownership_state()
+                print(f"CLOSE {symbol}: order_id={order.id}")
+
     def _enforce_daily_loss_stop(self, account) -> bool:
         local_now = pd.Timestamp.now(tz="America/New_York")
         today = local_now.date().isoformat()
@@ -313,14 +427,7 @@ class PaperTrader:
             print(f"Daily risk baseline reset: equity=${self.session_start_equity:,.2f}")
         if self.daily_loss_stop_triggered:
             # A prior process may have stopped before flatten orders filled.
-            self.broker.cancel_open_orders()
-            pending = self.broker.open_order_symbols()
-            for position in self.broker.positions():
-                try:
-                    if position.symbol not in pending:
-                        self.broker.close_position(position.symbol)
-                except Exception as exc:
-                    print(f"LOSS-STOP RETRY FAILED {position.symbol}: {exc}")
+            self._close_owned_positions()
             return True
         baseline = self.session_start_equity or float(account.equity)
         equity = account_equity
@@ -332,14 +439,7 @@ class PaperTrader:
                 f"{self.daily_loss_limit_fraction:.1%} loss limit; flattening and "
                 "blocking further entries for today."
             )
-            self.broker.cancel_open_orders()
-            pending = self.broker.open_order_symbols()
-            for position in self.broker.positions():
-                try:
-                    if position.symbol not in pending:
-                        self.broker.close_position(position.symbol)
-                except Exception as exc:
-                    print(f"LOSS-STOP CLOSE FAILED {position.symbol}: {exc}")
+            self._close_owned_positions()
             return True
         return False
 
@@ -364,16 +464,7 @@ class PaperTrader:
                 f"Regular-session close in {max(0.0, minutes_to_close):.1f} min; "
                 "flattening paper positions."
             )
-            self.broker.cancel_open_orders()
-            pending = self.broker.open_order_symbols()
-            for position in self.broker.positions():
-                try:
-                    if position.symbol not in pending:
-                        order = self.broker.close_position(position.symbol)
-                        if order is not None:
-                            print(f"CLOSE {position.symbol}: order_id={order.id}")
-                except Exception as exc:
-                    print(f"CLOSE FAILED {position.symbol}: {exc}")
+            self._close_owned_positions()
             return
         self.step_count += 1
         if self.step_count % self.scan_interval_steps == 1:
@@ -398,6 +489,9 @@ class PaperTrader:
 
             position = positions.get(symbol)
             current_qty = float(position.qty) if position is not None else 0.0
+            if position is not None and symbol not in self.owned_positions:
+                print(f"SKIP {symbol}: position ownership is unknown.")
+                continue
             equity = float(account.equity)
             target_qty = equity * target_fraction / price
             delta = target_qty - current_qty
@@ -424,6 +518,26 @@ class PaperTrader:
             self.last_prices[symbol] = price
             self.last_signals[symbol] = signal
             if order is not None:
+                try:
+                    order_quantity = float(order.qty)
+                    order_side = str(
+                        getattr(order.side, "value", order.side)
+                    ).lower()
+                    if not math.isfinite(order_quantity) or order_quantity <= 0.0:
+                        raise ValueError("broker returned an invalid order quantity")
+                    if order_side == "buy":
+                        signed_quantity = order_quantity
+                    elif order_side == "sell":
+                        signed_quantity = -order_quantity
+                    else:
+                        raise ValueError("broker returned an invalid order side")
+                    self.owned_positions[symbol] = current_qty + signed_quantity
+                    self._save_ownership_state()
+                except (AttributeError, TypeError, ValueError) as exc:
+                    print(
+                        f"OWNERSHIP NOT RECORDED {symbol}: {exc}; "
+                        "future changes will be blocked."
+                    )
                 orders_submitted += 1
                 print(f"ORDER {symbol}: target={target_fraction:+.1%}, qty_delta={delta:+.4f}, id={order.id}")
             log_symbols.append(

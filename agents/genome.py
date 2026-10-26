@@ -228,7 +228,26 @@ class Genome:
     ) -> None:
         for connection in self.connections:
             if random.random() < rate:
-                connection.enabled = not connection.enabled
+                if connection.enabled:
+                    connection.enabled = False
+                else:
+                    self.enable_connection(connection)
+
+    def enable_connection(
+        self,
+        connection: ConnectionGene,
+    ) -> bool:
+        if connection.enabled:
+            return True
+
+        if self._has_path(
+            connection.target,
+            connection.source,
+        ):
+            return False
+
+        connection.enabled = True
+        return True
 
     def add_connection(
         self,

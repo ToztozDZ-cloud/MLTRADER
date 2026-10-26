@@ -58,7 +58,7 @@ def random_immigrant(agent: Agent) -> Agent:
     immigrant = agent.clone()
     for connection in immigrant.genome.connections:
         connection.weight = random.gauss(0.0, 2.0)
-        connection.enabled = True
+        immigrant.genome.enable_connection(connection)
 
     for _ in range(random.randint(2, 4)):
         immigrant.genome.mutate(

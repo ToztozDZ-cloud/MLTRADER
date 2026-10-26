@@ -14,6 +14,8 @@ from trading.config import PAPER, require_paper_credentials
 class PaperBroker:
     """Alpaca broker wrapper that refuses to operate outside paper trading."""
 
+    ORDER_ID_PREFIX = "mltrader-"
+
     def __init__(self) -> None:
         if not PAPER:
             raise RuntimeError("This program is paper-trading only.")
@@ -41,9 +43,15 @@ class PaperBroker:
     def open_order_symbols(self) -> set[str]:
         return {order.symbol for order in self.open_orders()}
 
-    def cancel_open_orders(self):
-        """Request cancellation of all open orders; fills may still race cancellation."""
-        return self.client.cancel_orders()
+    def cancel_owned_open_orders(self):
+        """Cancel only this trader's tagged orders; fills may race cancellation."""
+        cancelled = []
+        for order in self.open_orders():
+            client_order_id = str(getattr(order, "client_order_id", "") or "")
+            if not client_order_id.startswith(self.ORDER_ID_PREFIX):
+                continue
+            cancelled.append(self.client.cancel_order_by_id(order.id))
+        return cancelled
 
     def position(self, symbol: str):
         for position in self.positions():

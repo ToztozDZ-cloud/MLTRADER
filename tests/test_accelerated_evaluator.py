@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 from agents.agent import Agent
 from agents.genome import ConnectionGene, Genome, NodeGene
@@ -59,6 +60,76 @@ def _constant_action_agent(lookback: int, action: float) -> Agent:
             ],
         )
     )
+
+
+def _cyclic_agent(lookback: int) -> Agent:
+    agent = _constant_action_agent(lookback, 0.1)
+    output_id = agent.genome.input_size
+    bias_id = output_id + 1
+    agent.genome.connections.append(
+        ConnectionGene(
+            innovation=1,
+            source=output_id,
+            target=bias_id,
+            weight=1.0,
+        )
+    )
+    return agent
+
+
+def _available_evaluation_devices() -> list[str]:
+    devices = ["cpu"]
+    if torch.cuda.is_available():
+        devices.append("cuda")
+    if AgentEvaluator._xpu_available():
+        devices.append("xpu")
+    return devices
+
+
+def test_mutate_connections_does_not_reactivate_a_cycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    genome = Genome(
+        input_size=0,
+        output_size=0,
+        nodes=[
+            NodeGene(node_id=node_id, node_type="hidden")
+            for node_id in range(3)
+        ],
+        connections=[
+            ConnectionGene(0, 0, 1, 1.0),
+            ConnectionGene(1, 1, 2, 1.0),
+            ConnectionGene(2, 2, 0, 1.0, enabled=False),
+        ],
+    )
+    draws = iter((1.0, 1.0, 0.0))
+    monkeypatch.setattr("agents.genome.random.random", lambda: next(draws))
+
+    genome.mutate_connections(rate=0.5)
+
+    assert not genome.connections[2].enabled
+    assert genome._has_path(0, 2)
+
+
+def test_mutate_connections_allows_acyclic_reactivation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    genome = Genome(
+        input_size=0,
+        output_size=0,
+        nodes=[
+            NodeGene(node_id=node_id, node_type="hidden")
+            for node_id in range(2)
+        ],
+        connections=[
+            ConnectionGene(0, 0, 1, 1.0, enabled=False),
+        ],
+    )
+    monkeypatch.setattr("agents.genome.random.random", lambda: 0.0)
+
+    genome.mutate_connections(rate=1.0)
+
+    assert genome.connections[0].enabled
 
 
 @pytest.mark.parametrize(
@@ -204,6 +275,39 @@ def test_multi_episode_population_batch_rejects_different_window_sizes() -> None
             agents,
             [_market_data(rows=32), _market_data(rows=33)],
             start_step=3,
+        )
+
+
+def test_cpu_reference_evaluation_rejects_cyclic_genomes() -> None:
+    lookback = 4
+    evaluator = AgentEvaluator(lookback=lookback, device="cpu")
+
+    with pytest.raises(
+        RuntimeError,
+        match="Genome contains a cycle or invalid dependency graph",
+    ):
+        evaluator.evaluate(
+            _cyclic_agent(lookback),
+            _market_data(),
+            start_step=lookback - 1,
+        )
+
+
+@pytest.mark.parametrize("device", _available_evaluation_devices())
+def test_population_evaluation_rejects_cyclic_genomes(
+    device: str,
+) -> None:
+    lookback = 4
+    evaluator = AgentEvaluator(lookback=lookback, device=device)
+
+    with pytest.raises(
+        RuntimeError,
+        match="Genome contains a cycle or invalid dependency graph",
+    ):
+        evaluator.evaluate_population(
+            [_cyclic_agent(lookback)],
+            _market_data(),
+            start_step=lookback - 1,
         )
 
 

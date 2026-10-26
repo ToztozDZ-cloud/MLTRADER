@@ -213,6 +213,8 @@ class AgentEvaluator:
                 "Not enough market data after start_step."
             )
 
+        self._topological_order(agent.genome)
+
         portfolio = Portfolio(
             initial_cash=self.initial_cash
         )

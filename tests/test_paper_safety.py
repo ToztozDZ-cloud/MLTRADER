@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from types import SimpleNamespace
 
 import numpy as np
@@ -76,6 +77,7 @@ def test_stale_bars_never_drive_position_rebalancing() -> None:
     trader.max_gross_exposure = 0.2
     trader.min_signal = 0.1
     trader.allow_short = False
+    trader.owned_positions = {}
     trader._discover_symbols = lambda: None
 
     assert trader._scan() == {}
@@ -108,12 +110,14 @@ def test_paper_risk_state_survives_restart_and_corruption_fails_closed(
 
 
 class _FakeBroker:
-    def __init__(self):
+    def __init__(self, positions=None):
         self.cancelled = 0
         self.closed = []
-        self._positions = [SimpleNamespace(symbol="AAA")]
+        self._positions = positions or [
+            SimpleNamespace(symbol="AAA", qty=1.0, market_value=100.0)
+        ]
 
-    def cancel_open_orders(self):
+    def cancel_owned_open_orders(self):
         self.cancelled += 1
 
     def open_order_symbols(self):
@@ -124,11 +128,83 @@ class _FakeBroker:
 
     def close_position(self, symbol):
         self.closed.append(symbol)
+        return SimpleNamespace(id=f"close-{symbol}")
+
+
+def _trader_for_session_close(tmp_path, owned_positions, positions):
+    trader = PaperTrader.__new__(PaperTrader)
+    trader.ownership_state_path = tmp_path / "ownership.json"
+    trader.owned_positions = owned_positions
+    trader.flatten_before_close_minutes = 10
+    trader.broker = _FakeBroker(positions)
+    trader.broker.clock = lambda: SimpleNamespace(
+        is_open=True,
+        next_close=pd.Timestamp.now(tz="UTC").to_pydatetime() + timedelta(minutes=1),
+    )
+    trader.broker.account = lambda: SimpleNamespace(equity=10_000.0)
+    trader._enforce_daily_loss_stop = lambda _account: False
+    return trader
+
+
+def test_session_close_only_liquidates_owned_position(tmp_path) -> None:
+    positions = [
+        SimpleNamespace(symbol="AAA", qty=1.0, market_value=100.0),
+        SimpleNamespace(symbol="BBB", qty=5.0, market_value=500.0),
+    ]
+    trader = _trader_for_session_close(tmp_path, {"AAA": 1.0}, positions)
+
+    trader.step()
+
+    assert trader.broker.closed == ["AAA"]
+    assert trader.owned_positions == {"AAA": 0.0}
+
+
+def test_session_close_leaves_unknown_positions_untouched(tmp_path) -> None:
+    positions = [
+        SimpleNamespace(symbol="MANUAL", qty=2.0, market_value=200.0),
+    ]
+    trader = _trader_for_session_close(tmp_path, {}, positions)
+
+    trader.step()
+
+    assert trader.broker.closed == []
+    assert trader.owned_positions == {}
+
+
+def test_changed_owned_quantity_revokes_authority_before_close(tmp_path) -> None:
+    positions = [
+        SimpleNamespace(symbol="AAA", qty=2.0, market_value=200.0),
+    ]
+    trader = _trader_for_session_close(tmp_path, {"AAA": 1.0}, positions)
+
+    trader.step()
+
+    assert trader.broker.closed == []
+    assert trader.owned_positions == {}
+    assert '"positions": {}' in trader.ownership_state_path.read_text()
+
+
+def test_ownership_state_loads_persisted_positions_and_rejects_corruption(tmp_path) -> None:
+    path = tmp_path / "ownership.json"
+    path.write_text(
+        '{"version": 1, "positions": {"AAA": 2.5}}', encoding="utf-8"
+    )
+    trader = PaperTrader.__new__(PaperTrader)
+    trader.ownership_state_path = path
+
+    trader._load_ownership_state()
+
+    assert trader.owned_positions == {"AAA": 2.5}
+    path.write_text("{invalid", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="refusing to trade"):
+        trader._load_ownership_state()
 
 
 def test_daily_loss_stop_cancels_orders_closes_and_persists(tmp_path) -> None:
     trader = PaperTrader.__new__(PaperTrader)
     trader.risk_state_path = tmp_path / "risk.json"
+    trader.ownership_state_path = tmp_path / "ownership.json"
+    trader.owned_positions = {"AAA": 1.0}
     trader.session_date = pd.Timestamp.now(tz="America/New_York").date().isoformat()
     trader.session_start_equity = 10_000.0
     trader.daily_loss_stop_triggered = False
@@ -145,10 +221,27 @@ def test_daily_loss_stop_cancels_orders_closes_and_persists(tmp_path) -> None:
 class _FakeClient:
     def __init__(self):
         self.submitted = []
+        self.cancelled = []
 
     def submit_order(self, order_data):
         self.submitted.append(order_data)
         return SimpleNamespace(id="paper-order")
+
+    def cancel_order_by_id(self, order_id):
+        self.cancelled.append(order_id)
+        return order_id
+
+
+def test_broker_cancels_only_orders_with_mltrader_ids() -> None:
+    broker = _broker()
+    broker.open_orders = lambda: [
+        SimpleNamespace(id="bot-order", client_order_id="mltrader-123"),
+        SimpleNamespace(id="manual-order", client_order_id="manual-123"),
+    ]
+
+    broker.cancel_owned_open_orders()
+
+    assert broker.client.cancelled == ["bot-order"]
 
 
 def _broker() -> PaperBroker:
