@@ -8,6 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
+
+from environment.compat import suppress_dependency_warnings
+
+suppress_dependency_warnings()
+
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit

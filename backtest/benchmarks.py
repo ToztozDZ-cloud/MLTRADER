@@ -12,6 +12,13 @@ import pandas as pd
 
 @dataclass
 class ReferencePolicy:
+    """Minimal transparent benchmark policy.
+
+    ``moving_average`` is only a 5-bar versus available 20-bar close mean
+    baseline: it is long when short > long, otherwise flat, and is not a
+    trading strategy or optimization target.
+    """
+
     name: str
     lookback: int
     max_position_fraction: float = 1.0

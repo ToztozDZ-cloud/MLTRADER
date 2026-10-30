@@ -78,12 +78,20 @@ class EvolutionEngine:
 
         champion = self.population.best().clone()
 
+        species_count = 0
+        species_elites: list[Agent] = []
+        if self.diversity_enabled:
+            species = self.speciation.classify(self.population.agents)
+            species_count = len(species)
+            for group in species:
+                if group.members:
+                    species_elites.append(max(group.members, key=lambda agent: agent.fitness))
+
         self.history.append(
             {
-                "generation":
-                    self.population.generation,
-                "best_fitness":
-                    champion.fitness,
+                "generation": self.population.generation,
+                "best_fitness": champion.fitness,
+                "species_count": species_count,
             }
         )
 
@@ -91,6 +99,9 @@ class EvolutionEngine:
             self.population.agents,
             self.elitism,
         )
+        for species_elite in species_elites:
+            if species_elite not in elites:
+                elites.append(species_elite)
         for elite in elites:
             elite.fitness = float("-inf")
 
@@ -151,8 +162,5 @@ class EvolutionEngine:
         )
 
         self.population.generation += 1
-
-        if self.diversity_enabled:
-            self.speciation.classify(self.population.agents)
 
         return champion

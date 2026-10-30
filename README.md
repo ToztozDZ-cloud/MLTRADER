@@ -28,7 +28,7 @@ Copy `.env.example` to `.env` only for paper trading. Never commit credentials.
 
 CSV columns are case-insensitive and must include `open`, `high`, `low`, `close`, and `volume`. Timestamp columns may be named `timestamp`, `datetime`, `date`, or `time`. Timestamped naive values are interpreted in the configured exchange timezone; ambiguous or nonexistent daylight-saving timestamps fail with a row-specific error. A file must contain one instrument. If no `symbol` column is supplied, the CSV filename supplies its identity.
 
-The shared loader sorts rows, rejects duplicate timestamps, non-finite or non-positive prices, inconsistent OHLC values, and negative volume. It does not invent candles or silently drop malformed rows. Intraday loaders apply the configured regular-session filter and detect irregular intervals within each session. Daily data is not filtered by intraday session hours. Keep raw data out of Git.
+The shared loader sorts rows, rejects duplicate timestamps, non-finite or non-positive prices, inconsistent OHLC values, and negative volume. It does not invent candles or silently drop malformed rows. Intraday loaders apply the configured regular-session filter and detect irregular intervals within each session. Strict interval validation remains available for data audits; training and live feeds can warn about mismatches and continue without changing the candles. If every dataset fails validation, evolution stops with an explicit error. Daily data is not filtered by intraday session hours. Keep raw data out of Git.
 
 The default market configuration uses five-minute US equity bars. Daily files require an explicit daily timeframe configuration. All instruments in one training run must use compatible timeframes and observation schemas.
 

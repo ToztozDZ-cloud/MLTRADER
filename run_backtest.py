@@ -12,30 +12,14 @@ from evolve import (
     DEFAULT_MARKET_CONFIG,
     DEFAULT_TRAINING_CONFIG,
     build_costs,
-    build_fitness_calculator,
+    build_backtest_engine,
     load_market_data,
     load_yaml,
 )
 
 
 def build_engine(market_config: dict, training_config: dict) -> BacktestEngine:
-    market = market_config.get("market", {})
-    data = market.get("data", {})
-    trading = market.get("trading", {})
-    execution = market.get("execution", {})
-    timeframe = str(data.get("timeframe", "1d"))
-    return BacktestEngine(
-        lookback=int(data.get("lookback", 64)),
-        initial_cash=float(market.get("initial_cash", 100_000.0)),
-        costs=build_costs(market_config),
-        allow_short=bool(trading.get("allow_short", False)),
-        max_position_fraction=float(trading.get("max_position_fraction", 1.0)),
-        max_leverage=float(trading.get("max_leverage", 1.0)),
-        execute_on_next_bar=bool(execution.get("execute_on_next_bar", True)),
-        execution_delay_bars=int(execution.get("execution_delay_bars", 0)),
-        timeframe=timeframe,
-        fitness_calculator=build_fitness_calculator(training_config, timeframe),
-    )
+    return build_backtest_engine(market_config, training_config)
 
 
 def main() -> None:

@@ -3,14 +3,19 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from alpaca.data.enums import DataFeed
 import yaml
 from dotenv import load_dotenv
 
+from environment.compat import suppress_dependency_warnings
+
+suppress_dependency_warnings()
+
+from alpaca.data.enums import DataFeed
+
 load_dotenv()
 
-API_KEY = os.getenv("APCA_API_KEY_ID")
-API_SECRET = os.getenv("APCA_API_SECRET_KEY")
+API_KEY = None
+API_SECRET = None
 
 # This project intentionally supports paper trading only.
 PAPER = True
@@ -72,15 +77,61 @@ def _load_paper_runtime_config() -> dict:
     return validate_paper_runtime_config(config)
 
 
-PAPER_RUNTIME_CONFIG = _load_paper_runtime_config()
-TIMEFRAME_MINUTES = int(PAPER_RUNTIME_CONFIG["market_data"]["timeframe"][:-1])
-DECISION_INTERVAL_SECONDS = TIMEFRAME_MINUTES * 60
-LOOKBACK = int(PAPER_RUNTIME_CONFIG["market_data"]["lookback"])
+class _LazyPaperRuntimeConfig(dict):
+    def _ensure_loaded(self) -> None:
+        if not getattr(self, "_loaded", False):
+            self.update(_load_paper_runtime_config())
+            self._loaded = True
+
+    def __getitem__(self, key):
+        self._ensure_loaded()
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self._ensure_loaded()
+        return super().get(key, default)
+
+    def __contains__(self, key):
+        self._ensure_loaded()
+        return super().__contains__(key)
+
+
+PAPER_RUNTIME_CONFIG = _LazyPaperRuntimeConfig()
+
+# Compatibility names are replaced by these lazy accessors; they intentionally
+# do not load YAML or environment configuration until runtime code requests it.
+LOOKBACK = None
+TIMEFRAME_MINUTES = None
+DECISION_INTERVAL_SECONDS = None
+
+
+def load_paper_runtime_config(*, reload: bool = False) -> dict:
+    if reload:
+        PAPER_RUNTIME_CONFIG.clear()
+        PAPER_RUNTIME_CONFIG._loaded = False
+    PAPER_RUNTIME_CONFIG._ensure_loaded()
+    return dict(PAPER_RUNTIME_CONFIG)
+
+
+def get_timeframe_minutes() -> int:
+    settings = load_paper_runtime_config()["market_data"]
+    return int(settings["timeframe"][:-1])
+
+
+def get_decision_interval_seconds() -> int:
+    return get_timeframe_minutes() * 60
+
+
+def get_lookback() -> int:
+    return int(load_paper_runtime_config()["market_data"]["lookback"])
+
 
 def require_paper_credentials() -> tuple[str, str]:
-    if not API_KEY or not API_SECRET:
+    api_key = os.getenv("APCA_API_KEY_ID") or API_KEY
+    api_secret = os.getenv("APCA_API_SECRET_KEY") or API_SECRET
+    if not api_key or not api_secret:
         raise RuntimeError("Missing Alpaca paper credentials in .env")
-    return API_KEY, API_SECRET
+    return api_key, api_secret
 
 
 def load_universe_config() -> dict:

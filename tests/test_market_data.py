@@ -64,6 +64,21 @@ def test_missing_intraday_interval_is_rejected() -> None:
         validate_ohlcv(_bars(stamps), timeframe="5m", timezone="UTC")
 
 
+def test_missing_intraday_interval_can_be_non_fatal() -> None:
+    stamps = pd.to_datetime(
+        ["2024-01-02 10:00", "2024-01-02 10:05", "2024-01-02 10:15"],
+        utc=True,
+    )
+    with pytest.warns(UserWarning, match="irregular 5m interval"):
+        result = validate_ohlcv(
+            _bars(stamps),
+            timeframe="5m",
+            timezone="UTC",
+            on_bar_interval_error="warn",
+        )
+    assert len(result) == 3
+
+
 def test_two_hour_bars_are_checked_against_their_configured_interval() -> None:
     stamps = pd.to_datetime(
         ["2024-01-02 09:30", "2024-01-02 11:30"],

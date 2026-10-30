@@ -86,6 +86,7 @@ def load_market_data(
         timeframe=timeframe,
         require_timestamp=True,
         minimum_rows=100,
+        on_bar_interval_error="warn",
     )
 
 
@@ -322,6 +323,31 @@ def build_costs(
     )
 
 
+def build_backtest_engine(
+    market_config: dict,
+    training_config: dict,
+) :
+    from backtest.engine import BacktestEngine
+
+    market = market_config.get("market", {})
+    data = market.get("data", {})
+    trading = market.get("trading", {})
+    execution = market.get("execution", {})
+    timeframe = str(data.get("timeframe", "1d"))
+    return BacktestEngine(
+        lookback=int(data.get("lookback", 64)),
+        initial_cash=float(market.get("initial_cash", 100_000.0)),
+        costs=build_costs(market_config),
+        allow_short=bool(trading.get("allow_short", False)),
+        max_position_fraction=float(trading.get("max_position_fraction", 1.0)),
+        max_leverage=float(trading.get("max_leverage", 1.0)),
+        execute_on_next_bar=bool(execution.get("execute_on_next_bar", True)),
+        execution_delay_bars=int(execution.get("execution_delay_bars", 0)),
+        timeframe=timeframe,
+        fitness_calculator=build_fitness_calculator(training_config, timeframe),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
@@ -406,15 +432,24 @@ def main() -> None:
     configured_timeframe = str(market_data_settings.get("timeframe", "1d"))
     configured_timezone = str(market_data_settings.get("timezone", "America/New_York"))
     regular_session_only = bool(market_data_settings.get("regular_session_only", True))
-    market_datasets = [
-        load_market_data(
-            path,
-            timeframe=configured_timeframe,
-            exchange_timezone=configured_timezone,
-            regular_session_only=regular_session_only,
-        )
-        for path in args.data
-    ]
+    market_datasets = []
+    loaded_paths = []
+    for path in args.data:
+        try:
+            frame = load_market_data(
+                path,
+                timeframe=configured_timeframe,
+                exchange_timezone=configured_timezone,
+                regular_session_only=regular_session_only,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"Warning: skipping incompatible market data {path}: {exc}")
+            continue
+        market_datasets.append(frame)
+        loaded_paths.append(path)
+    if not market_datasets:
+        raise ValueError("No compatible market datasets were loaded")
+    args.data = loaded_paths
     market_data = market_datasets[0] if len(market_datasets) == 1 else market_datasets
 
     evaluation_config = training_config.get("training", {}).get("evaluation", {})

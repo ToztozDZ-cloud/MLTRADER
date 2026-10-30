@@ -47,6 +47,8 @@ class TradingCosts:
         quantity = float(quantity)
         if not market_price > 0 or not market_price < float("inf"):
             raise ValueError("market_price must be finite and positive.")
+        if not -float("inf") < quantity < float("inf"):
+            raise ValueError("quantity must be finite.")
         if quantity == 0:
             return market_price
         direction = 1.0 if quantity > 0 else -1.0

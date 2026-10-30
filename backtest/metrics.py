@@ -17,8 +17,6 @@ def max_drawdown(equity_curve: list[float]) -> float:
 
     if len(equity) == 0 or not np.isfinite(equity).all() or np.any(equity <= 0):
         return 1.0 if len(equity) else 0.0
-    if len(equity) == 0:
-        return 0.0
 
     running_max = np.maximum.accumulate(equity)
 

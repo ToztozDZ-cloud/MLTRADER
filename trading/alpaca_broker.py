@@ -4,6 +4,10 @@ from decimal import Decimal, ROUND_DOWN
 import math
 from typing import Any
 
+from environment.compat import suppress_dependency_warnings
+
+suppress_dependency_warnings()
+
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce, AssetStatus, AssetClass, QueryOrderStatus
 from alpaca.trading.requests import MarketOrderRequest, GetAssetsRequest, GetOrdersRequest

@@ -160,7 +160,7 @@ class NeuralAgent:
             [
                 node
                 for node in self.genome.nodes
-                if node.node_type == "input"
+                if node.node_type in ("input", "memory")
             ],
             key=lambda node: node.node_id,
         )
@@ -220,6 +220,7 @@ class NeuralAgent:
 
             if node.node_type in (
                 "input",
+                "memory",
                 "bias",
             ):
                 continue

@@ -34,6 +34,23 @@ def test_buy_and_hold_baseline_enters_once_and_holds_shares() -> None:
     assert result["metrics"]["trade_count"] == 2
 
 
+def test_moving_average_is_a_minimal_capped_history_baseline() -> None:
+    policy = ReferencePolicy("moving_average", lookback=6)
+
+    rising = np.array([99.0, 99.0, 99.0, 99.0, 100.0, 101.0])
+    market = np.column_stack(
+        [np.ones(6), np.ones(6), np.ones(6), rising, np.ones(6)]
+    )
+    assert policy.act(market.reshape(-1)) == 1.0
+
+    policy = ReferencePolicy("moving_average", lookback=6)
+    falling = np.array([101.0, 101.0, 101.0, 101.0, 100.0, 99.0])
+    market = np.column_stack(
+        [np.ones(6), np.ones(6), np.ones(6), falling, np.ones(6)]
+    )
+    assert policy.act(market.reshape(-1)) == 0.0
+
+
 def test_buy_and_hold_ignores_floating_point_dust_rebalances() -> None:
     close = 100.0 + 0.1 * np.arange(128) + np.sin(np.arange(128) / 3.0)
     open_price = np.r_[close[0], close[:-1]]

@@ -79,7 +79,7 @@ class WalkForwardValidator:
             raise ValueError("Walk-forward market data is empty")
 
         results: list[WalkForwardResult] = []
-        trained_agents: list[Agent] = []
+        trained_agent_ids: set[int] = set()
         validation_start = self.train_size + self.embargo_bars
         fold = 0
         while validation_start + self.validation_size <= len(market_data):
@@ -100,11 +100,11 @@ class WalkForwardValidator:
             agent = train_agent(training_data.copy(), fold_seed)
             if not isinstance(agent, Agent):
                 raise TypeError("train_agent must return an agents.agent.Agent")
-            if any(agent is previous for previous in trained_agents):
+            if id(agent) in trained_agent_ids:
                 raise ValueError(
                     "Each walk-forward fold must return a freshly trained Agent instance"
                 )
-            trained_agents.append(agent)
+            trained_agent_ids.add(id(agent))
             training_fitness = float(agent.fitness)
 
             lookback = self.engine.evaluator.lookback

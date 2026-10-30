@@ -5,14 +5,19 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
+
+from environment.compat import suppress_dependency_warnings
+
+suppress_dependency_warnings()
+
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 
 from environment.data import validate_ohlcv
 from trading.config import (
-    LOOKBACK,
-    TIMEFRAME_MINUTES,
+    get_lookback,
+    get_timeframe_minutes,
     require_paper_credentials,
     resolve_market_data_feed,
 )
@@ -45,9 +50,11 @@ class MarketData:
 
     @staticmethod
     def _timeframe():
-        return TimeFrame(TIMEFRAME_MINUTES, TimeFrameUnit.Minute)
+        return TimeFrame(get_timeframe_minutes(), TimeFrameUnit.Minute)
 
-    def get_recent_bars(self, symbols: str | list[str], limit: int = LOOKBACK):
+    def get_recent_bars(self, symbols: str | list[str], limit: int | None = None):
+        if limit is None:
+            limit = get_lookback()
         requested_symbols = [symbols] if isinstance(symbols, str) else symbols
         symbol_list = list(
             dict.fromkeys(str(symbol).strip().upper() for symbol in requested_symbols)
@@ -96,7 +103,7 @@ class MarketData:
         if result.empty:
             return result
         index = pd.to_datetime(result.index, utc=True, errors="coerce")
-        cutoff = pd.Timestamp.now(tz="UTC").floor(f"{TIMEFRAME_MINUTES}min")
+        cutoff = pd.Timestamp.now(tz="UTC").floor(f"{get_timeframe_minutes()}min")
         result = result.loc[index < cutoff].copy()
         result["timestamp"] = index[index < cutoff]
         checked = validate_ohlcv(
@@ -104,14 +111,17 @@ class MarketData:
             source="Alpaca paper market data",
             timezone="America/New_York",
             regular_session_only=True,
-            timeframe=f"{TIMEFRAME_MINUTES}m",
+            timeframe=f"{get_timeframe_minutes()}m",
             require_timestamp=True,
+            on_bar_interval_error="warn",
         )
         return checked.set_index("timestamp")
 
     def get_recent_bars_batched(
-        self, symbols: list[str], limit: int = LOOKBACK, batch_size: int = 50
+        self, symbols: list[str], limit: int | None = None, batch_size: int = 50
     ) -> MarketDataBatchResult:
+        if limit is None:
+            limit = get_lookback()
         unique_symbols = list(
             dict.fromkeys(str(symbol).strip().upper() for symbol in symbols)
         )

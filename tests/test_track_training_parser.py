@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import argparse
 import csv
 from queue import Queue
+from types import SimpleNamespace
 
 import pytest
 
@@ -93,3 +95,74 @@ def test_champion_snapshot_uses_run_scoped_champion(tmp_path, monkeypatch):
 
     assert snapshot == run_dir / "generation_0003.json"
     assert snapshot.read_text(encoding="utf-8") == "run champion"
+
+
+def _cli_args(tmp_path):
+    data = tmp_path / "data.csv"
+    training = tmp_path / "training.yaml"
+    market = tmp_path / "market.yaml"
+    for path in (data, training, market):
+        path.write_text("test", encoding="utf-8")
+    return SimpleNamespace(
+        data=data,
+        training_config=training,
+        market_config=market,
+        generations=None,
+        device="auto",
+        resume_from=None,
+        reset_champion=False,
+    )
+
+
+def _mock_cli_dependencies(tmp_path, monkeypatch, expected_return):
+    args = _cli_args(tmp_path)
+    monkeypatch.setattr(track_training, "parse_args", lambda: args)
+    monkeypatch.setattr(track_training, "EVOLVE_SCRIPT", tmp_path / "evolve.py")
+    track_training.EVOLVE_SCRIPT.write_text("", encoding="utf-8")
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    monkeypatch.setattr(track_training, "create_run_directory", lambda: run_dir)
+
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            self.process = None
+
+        def start(self):
+            pass
+
+    class FakeRoot:
+        def mainloop(self):
+            pass
+
+    monkeypatch.setattr(track_training, "TrainingRunner", FakeRunner)
+    monkeypatch.setattr(track_training.tk, "Tk", lambda: FakeRoot())
+    monkeypatch.setattr(
+        track_training,
+        "TrainingGraph",
+        lambda **kwargs: SimpleNamespace(return_code=expected_return),
+    )
+    return args
+
+
+@pytest.mark.parametrize("expected_return", [0, 7])
+def test_training_cli_returns_process_status(tmp_path, monkeypatch, expected_return):
+    _mock_cli_dependencies(tmp_path, monkeypatch, expected_return)
+
+    assert track_training.main() == expected_return
+
+
+def test_reset_champion_cleans_global_not_evolve_run_champion(tmp_path, monkeypatch):
+    args = _mock_cli_dependencies(tmp_path, monkeypatch, 0)
+    args.reset_champion = True
+
+    global_champion = tmp_path / "models" / "champions" / "best_agent.json"
+    global_champion.parent.mkdir(parents=True)
+    global_champion.write_text("champion", encoding="utf-8")
+    monkeypatch.setattr(track_training, "CHAMPION_PATH", global_champion)
+
+    assert track_training.main() == 0
+    assert not global_champion.exists()
+
+    command = track_training.build_evolve_command(args, tmp_path / "run")
+    assert "--reset-champion" not in command

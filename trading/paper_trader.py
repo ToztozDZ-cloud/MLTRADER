@@ -15,13 +15,15 @@ from environment.data import validate_ohlcv
 from environment.observation import ObservationBuilder
 from trading.alpaca_broker import PaperBroker
 from trading.config import (
-    DECISION_INTERVAL_SECONDS, LOG_PATH, LOOKBACK, MODEL_PATH, TIMEFRAME_MINUTES,
+    LOG_PATH, MODEL_PATH,
+    get_decision_interval_seconds, get_lookback, get_timeframe_minutes,
     load_universe_config,
 )
 from trading.market_data import MarketData, MarketDataBatchResult
 from trading.trade_logger import TradeLogger
 
-FEATURE_COUNT = ObservationBuilder.input_size(LOOKBACK)
+def feature_count() -> int:
+    return ObservationBuilder.input_size(get_lookback())
 
 
 class PaperTrader:
@@ -66,8 +68,8 @@ class PaperTrader:
         print(f"Loading trained agent from {MODEL_PATH}...")
         self.agent = AgentSerializer.load(
             MODEL_PATH,
-            expected_observation=ObservationBuilder.schema(LOOKBACK),
-            expected_timeframe=f"{TIMEFRAME_MINUTES}m",
+            expected_observation=ObservationBuilder.schema(get_lookback()),
+            expected_timeframe=f"{get_timeframe_minutes()}m",
             require_metadata=True,
         )
         self.agent.reset()
@@ -126,12 +128,14 @@ class PaperTrader:
             source="paper market data",
             timezone="America/New_York",
             regular_session_only=True,
-            timeframe=f"{TIMEFRAME_MINUTES}m",
+            timeframe=f"{get_timeframe_minutes()}m",
             require_timestamp=True,
+            on_bar_interval_error="warn",
         )
-        if len(checked) < LOOKBACK:
+        lookback = get_lookback()
+        if len(checked) < lookback:
             return pd.DataFrame()
-        return checked.tail(LOOKBACK).set_index("timestamp")
+        return checked.tail(lookback).set_index("timestamp")
 
     @staticmethod
     def _bars_are_fresh(bars: pd.DataFrame, max_age_minutes: int = 10) -> bool:
@@ -167,17 +171,18 @@ class PaperTrader:
             quantity / max(1.0, abs(quantity)),
             ((price - average_entry) * quantity / equity) if quantity else 0.0,
         ], dtype=np.float32)
+        lookback = get_lookback()
         observation = ObservationBuilder.build_from_history(
-            frame.reset_index(), portfolio_state, LOOKBACK
+            frame.reset_index(), portfolio_state, lookback
         )
-        if observation.shape != (FEATURE_COUNT,) or not np.isfinite(observation).all():
+        if observation.shape != (feature_count(),) or not np.isfinite(observation).all():
             raise ValueError(f"Invalid observation vector: shape={observation.shape}")
         return observation
 
     def _scan(self) -> dict[str, tuple[float, float, pd.DataFrame, float]]:
         self._discover_symbols()
         market_data_result = self.market.get_recent_bars_batched(
-            self.symbols, limit=LOOKBACK, batch_size=self.batch_size
+            self.symbols, limit=get_lookback(), batch_size=self.batch_size
         )
         if isinstance(market_data_result, MarketDataBatchResult):
             bars_by_symbol = market_data_result.bars
@@ -587,7 +592,7 @@ class PaperTrader:
                 break
             except Exception as exc:
                 print(f"\nSCAN ERROR: {type(exc).__name__}: {exc}")
-            time.sleep(DECISION_INTERVAL_SECONDS)
+            time.sleep(get_decision_interval_seconds())
 
 
 if __name__ == "__main__":

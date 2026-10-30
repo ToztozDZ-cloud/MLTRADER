@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
+import warnings
+
 import numpy as np
 import pandas as pd
 
@@ -59,9 +61,14 @@ def validate_ohlcv(
     regular_session_only: bool = False,
     timeframe: str | None = None,
     require_timestamp: bool = False,
+    on_bar_interval_error: str = "raise",
 ) -> pd.DataFrame:
     """Normalize and validate one instrument's OHLCV bars without fabricating data."""
     label = _source_name(source)
+    if on_bar_interval_error not in {"raise", "warn", "ignore"}:
+        raise ValueError(
+            "on_bar_interval_error must be one of: 'raise', 'warn', or 'ignore'"
+        )
     if not isinstance(data, pd.DataFrame) or data.empty:
         raise ValueError(f"{label}: market data is empty or not a DataFrame")
 
@@ -172,26 +179,35 @@ def validate_ohlcv(
                 irregular = within_session & deltas.ne(
                     pd.Timedelta(minutes=expected_minutes)
                 )
+
+                def report_interval_error(message: str) -> None:
+                    if on_bar_interval_error == "raise":
+                        raise ValueError(message)
+                    if on_bar_interval_error == "warn":
+                        warnings.warn(message, UserWarning, stacklevel=3)
+
                 if irregular.any():
                     position = int(np.flatnonzero(irregular.to_numpy())[0])
-                    raise ValueError(
+                    found = deltas.iloc[position]
+                    report_interval_error(
                         f"{label}: irregular {timeframe} interval before row {position + 2}; "
-                        f"found {deltas.iloc[position]}"
+                        f"found {found}"
                     )
                 observed = deltas.loc[deltas <= pd.Timedelta(minutes=expected_minutes)]
                 if observed.empty:
-                    raise ValueError(
+                    report_interval_error(
                         f"{label}: no intraday intervals found for {timeframe} data"
                     )
-                median_minutes = observed.median().total_seconds() / 60.0
-                if (
-                    not expected_minutes * 0.5
-                    <= median_minutes
-                    <= expected_minutes * 1.5
-                ):
-                    raise ValueError(
-                        f"{label}: observed {median_minutes:g}-minute bars, expected {timeframe}"
-                    )
+                else:
+                    median_minutes = observed.median().total_seconds() / 60.0
+                    if (
+                        not expected_minutes * 0.5
+                        <= median_minutes
+                        <= expected_minutes * 1.5
+                    ):
+                        report_interval_error(
+                            f"{label}: observed {median_minutes:g}-minute bars, expected {timeframe}"
+                        )
         elif timeframe is not None and len(result) > 1:
             median_interval = result["timestamp"].diff().dropna().median()
             if median_interval < pd.Timedelta(hours=12):
@@ -211,6 +227,7 @@ def load_ohlcv_csv(
     timeframe: str | None = None,
     require_timestamp: bool = False,
     minimum_rows: int = 1,
+    on_bar_interval_error: str = "raise",
 ) -> pd.DataFrame:
     source = Path(path)
     if not source.exists():
@@ -226,6 +243,7 @@ def load_ohlcv_csv(
         regular_session_only=regular_session_only,
         timeframe=timeframe,
         require_timestamp=require_timestamp,
+        on_bar_interval_error=on_bar_interval_error,
     )
     if "symbol" not in result.columns:
         result["symbol"] = source.stem.upper()

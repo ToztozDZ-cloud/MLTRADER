@@ -18,7 +18,7 @@ class Population:
         size: int,
         input_size: int,
         output_size: int,
-        hidden_size: int = 64,
+        hidden_size: int = 0,
     ) -> None:
         if size <= 0:
             raise ValueError(

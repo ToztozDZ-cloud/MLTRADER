@@ -6,6 +6,7 @@ from environment.costs import TradingCosts
 from environment.exchange import Exchange
 from environment.portfolio import Portfolio
 from backtest.engine import BacktestEngine
+from backtest.metrics import max_drawdown
 from training.fitness import periods_per_year_for_timeframe
 
 
@@ -24,6 +25,37 @@ def test_exchange_deducts_commission_once_and_models_adverse_fill() -> None:
     assert result.execution_price == pytest.approx(100.4)
     assert result.transaction_cost == pytest.approx(1.004)
     assert portfolio.cash == pytest.approx(10000.0 - 10 * 100.4 - 1.004)
+
+
+def test_max_drawdown_empty_and_invalid_curves_keep_defined_results() -> None:
+    assert max_drawdown([]) == 0.0
+    assert max_drawdown([100.0, 0.0]) == 1.0
+    assert max_drawdown([100.0, float("nan")]) == 1.0
+
+
+def test_execution_quantity_must_be_finite() -> None:
+    costs = TradingCosts()
+    with pytest.raises(ValueError, match="quantity must be finite"):
+        costs.execution_price(100.0, float("inf"))
+    with pytest.raises(ValueError, match="quantity must be finite"):
+        costs.execution_price(100.0, float("nan"))
+
+
+def test_trade_logger_writes_utf8_csv_and_appends_without_repeating_header(tmp_path) -> None:
+    from trading.trade_logger import TradeLogger
+
+    path = tmp_path / "trades.csv"
+    logger = TradeLogger(str(path))
+    logger.log("ÉQ", 100.25, 0.5, 1.0, 0.0, 10_000.0, "order-1")
+
+    first = path.read_text(encoding="utf-8")
+    assert "timestamp,symbol,price,agent_output" in first
+    assert "ÉQ" in first
+
+    logger.log("ÉQ", 101.25, 0.25, 0.5, 1.0, 10_100.0, "order-2")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 3
+    assert sum(line.startswith("timestamp,symbol") for line in lines) == 1
 
 
 def test_cost_rates_must_be_non_negative_and_finite() -> None:
@@ -57,6 +89,22 @@ def test_hand_calculated_round_trip_cash_realized_pnl_and_costs() -> None:
 def test_unsupported_same_bar_execution_mode_is_rejected() -> None:
     with pytest.raises(ValueError, match="next-bar-open execution"):
         BacktestEngine(execute_on_next_bar=False)
+
+
+def test_process_worker_entry_point_is_module_level_and_invokes_evaluator() -> None:
+    class Evaluator:
+        def evaluate(self, agent, market_data):
+            return (agent, market_data)
+
+    from training.parallel import _evaluate_one
+
+    agent = object()
+    market_data = object()
+    returned_agent, result = _evaluate_one(agent, Evaluator, market_data)
+
+    assert returned_agent is agent
+    assert result == (agent, market_data)
+    assert _evaluate_one.__module__ == "training.parallel"
 
 
 def test_intraday_annualization_matches_configured_timeframe() -> None:

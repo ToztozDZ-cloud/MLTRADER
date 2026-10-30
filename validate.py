@@ -13,8 +13,8 @@ from environment.observation import ObservationBuilder
 from evolve import (
     DEFAULT_MARKET_CONFIG,
     DEFAULT_TRAINING_CONFIG,
+    build_backtest_engine,
     build_costs,
-    build_fitness_calculator,
     load_market_data,
     load_yaml,
 )
@@ -25,23 +25,7 @@ from validation.walk_forward import WalkForwardValidator
 
 
 def _build_engine(market_config: dict, training_config: dict) -> BacktestEngine:
-    market = market_config.get("market", {})
-    data = market.get("data", {})
-    trading = market.get("trading", {})
-    execution = market.get("execution", {})
-    timeframe = str(data.get("timeframe", "1d"))
-    return BacktestEngine(
-        lookback=int(data.get("lookback", 64)),
-        initial_cash=float(market.get("initial_cash", 100_000.0)),
-        costs=build_costs(market_config),
-        allow_short=bool(trading.get("allow_short", False)),
-        max_position_fraction=float(trading.get("max_position_fraction", 1.0)),
-        max_leverage=float(trading.get("max_leverage", 1.0)),
-        execute_on_next_bar=bool(execution.get("execute_on_next_bar", True)),
-        execution_delay_bars=int(execution.get("execution_delay_bars", 0)),
-        timeframe=timeframe,
-        fitness_calculator=build_fitness_calculator(training_config, timeframe),
-    )
+    return build_backtest_engine(market_config, training_config)
 
 
 def _file_sha256(path: Path) -> str:
@@ -71,6 +55,49 @@ def _load_data(paths: list[Path], market_config: dict):
     ]
 
 
+def validate_mode_options(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    holdout_only = (
+        args.train_size is not None
+        or args.validation_size is not None
+        or args.step_size is not None
+        or args.minimum_history is not None
+        or args.generations is not None
+    )
+    if args.mode == "holdout" and holdout_only:
+        parser.error(
+            "walk-forward options --train-size, --validation-size, --step-size, "
+            "--minimum-history, and --generations are only valid with --mode walk-forward"
+        )
+
+    if args.mode == "walk-forward" and (
+        args.train_fraction != 0.70
+        or args.validation_fraction != 0.15
+        or args.test_fraction != 0.15
+    ):
+        parser.error(
+            "holdout options --train-fraction, --validation-fraction, and "
+            "--test-fraction are only valid with --mode holdout"
+        )
+
+    if args.mode == "holdout":
+        fractions = (args.train_fraction, args.validation_fraction, args.test_fraction)
+        if any(value < 0 or value > 1 for value in fractions) or sum(fractions) != 1.0:
+            parser.error("holdout fractions must be between 0 and 1 and sum to 1.0")
+
+    if args.mode == "walk-forward":
+        for name, value in (
+            ("--train-size", args.train_size),
+            ("--validation-size", args.validation_size),
+            ("--step-size", args.step_size),
+            ("--minimum-history", args.minimum_history),
+            ("--generations", args.generations),
+        ):
+            if value is not None and value < 1:
+                parser.error(f"{name} must be at least 1")
+        if args.embargo_bars is not None and args.embargo_bars < 0:
+            parser.error("--embargo-bars must be non-negative")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Run isolated holdout evaluation or retraining walk-forward validation."
@@ -98,6 +125,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--generations", type=int, default=None)
     args = parser.parse_args()
+    validate_mode_options(args, parser)
 
     training_config = load_yaml(args.training_config)
     market_config = load_yaml(args.market_config)

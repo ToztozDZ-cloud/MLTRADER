@@ -242,11 +242,6 @@ def build_evolve_command(
     command.extend(["--checkpoint-dir", str(run_dir / "checkpoints")])
     command.extend(["--champion-dir", str(run_dir / "champions")])
 
-    if args.reset_champion:
-        command.append(
-            "--reset-champion"
-        )
-
     return command
 
 
@@ -363,6 +358,7 @@ class TrainingRunner:
         self.process: (
             subprocess.Popen[str] | None
         ) = None
+        self.return_code: int | None = None
 
         self.current_generation: (
             int | None
@@ -439,6 +435,7 @@ class TrainingRunner:
                 self.process_line(line)
 
             return_code = self.process.wait()
+            self.return_code = return_code
 
             self.events.put(
                 (
@@ -451,6 +448,7 @@ class TrainingRunner:
             )
 
         except Exception as exc:
+            self.return_code = 1
             self.events.put(
                 (
                     "error",
@@ -697,8 +695,32 @@ class TrainingRunner:
 # GRAPH WINDOW
 # ============================================================================
 
+class TrainingDashboardModel:
+    """UI-independent state accumulated from training events."""
+
+    def __init__(self) -> None:
+        self.generations: list[int] = []
+        self.returns: list[float] = []
+        self.fitnesses: list[float] = []
+        self.equities: list[float] = []
+        self.drawdowns: list[float] = []
+        self.turnovers: list[float] = []
+
+    def record_generation(self, generation: int, metrics: dict) -> None:
+        def finite_or_nan(key: str) -> float:
+            value = metrics.get(key)
+            return float(value) if value is not None else float("nan")
+
+        self.generations.append(generation)
+        self.fitnesses.append(finite_or_nan("best_fitness"))
+        self.returns.append(finite_or_nan("return_percent"))
+        self.equities.append(finite_or_nan("final_equity"))
+        self.drawdowns.append(finite_or_nan("max_drawdown_percent"))
+        self.turnovers.append(finite_or_nan("turnover"))
+
+
 class TrainingGraph:
-    """Live return window plus a second window for fitness and equity."""
+    """Tkinter presentation only; event and run-process concerns stay outside this view."""
 
     def __init__(
         self,
@@ -712,15 +734,17 @@ class TrainingGraph:
         self.events = events
         self.run_dir = run_dir
 
-        self.generations: list[int] = []
-        self.returns: list[float] = []
-        self.fitnesses: list[float] = []
-        self.equities: list[float] = []
-        self.drawdowns: list[float] = []
-        self.turnovers: list[float] = []
+        self.model = TrainingDashboardModel()
+        self.generations = self.model.generations
+        self.returns = self.model.returns
+        self.fitnesses = self.model.fitnesses
+        self.equities = self.model.equities
+        self.drawdowns = self.model.drawdowns
+        self.turnovers = self.model.turnovers
 
         self.closed = False
         self.training_finished = False
+        self.return_code = 0
         self.total_generations = 0
         self.generation_durations: list[float] = []
         self.palette = {
@@ -1210,15 +1234,10 @@ class TrainingGraph:
         return_percent = float(metrics["return_percent"])
         fitness = metrics["best_fitness"]
         final_equity = metrics["final_equity"]
-        self.generations.append(generation)
-        self.returns.append(return_percent)
+        self.model.record_generation(generation, metrics)
         duration = metrics.get("generation_time_seconds")
-        self.fitnesses.append(float(fitness) if fitness is not None else float("nan"))
-        self.equities.append(float(final_equity) if final_equity is not None else float("nan"))
         drawdown = metrics.get("max_drawdown_percent")
         turnover = metrics.get("turnover")
-        self.drawdowns.append(float(drawdown) if drawdown is not None else float("nan"))
-        self.turnovers.append(float(turnover) if turnover is not None else float("nan"))
         self.generation_durations.append(float(duration) if duration is not None else float("nan"))
 
         fitness_text = "—" if fitness is None else f"{float(fitness):.6f}"
@@ -1269,6 +1288,8 @@ class TrainingGraph:
         self.training_finished = True
         return_code = payload["return_code"]
 
+        self.return_code = 0 if return_code == 0 else return_code
+
         if return_code == 0:
             self.status_label.config(
                 text=f"Training complete · {len(self.generations)} generations"
@@ -1283,6 +1304,7 @@ class TrainingGraph:
 
     def handle_error(self, payload: dict) -> None:
         self.training_finished = True
+        self.return_code = 1
         message = f"Training error: {payload['message']}"
 
         self.status_label.config(text=message)
@@ -1451,6 +1473,9 @@ def main() -> int:
         run_champion.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(resume_path, run_champion)
 
+    if args.reset_champion:
+        clean_champion()
+
     print("=" * 72)
     print()
 
@@ -1500,7 +1525,7 @@ def main() -> int:
 
     root = tk.Tk()
 
-    TrainingGraph(
+    graph = TrainingGraph(
         root=root,
         runner=runner,
         events=events,
@@ -1511,7 +1536,7 @@ def main() -> int:
 
     root.mainloop()
 
-    return 0
+    return int(graph.return_code)
 
 
 if __name__ == "__main__":

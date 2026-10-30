@@ -6,6 +6,11 @@ from datetime import datetime, timezone
 
 
 class TradeLogger:
+    """Append trade decisions to a UTF-8 CSV with a stable header.
+
+    Existing files are left intact. A missing or zero-byte file receives one
+    header; later entries are appended without repeating it.
+    """
 
     def __init__(
         self,
@@ -22,12 +27,13 @@ class TradeLogger:
                 exist_ok=True,
             )
 
-        if not os.path.exists(path):
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
 
             with open(
                 path,
                 "w",
                 newline="",
+                encoding="utf-8",
             ) as file:
 
                 writer = csv.writer(file)
@@ -60,6 +66,7 @@ class TradeLogger:
             self.path,
             "a",
             newline="",
+            encoding="utf-8",
         ) as file:
 
             writer = csv.writer(file)
